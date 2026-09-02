@@ -2,6 +2,8 @@
 
 > **Installing and wiring a harness:** see
 > [`docs/install-and-usage.md`](docs/install-and-usage.md).
+> **Offloading a harness's own initial context:** see
+> [`docs/harness-context-offload.md`](docs/harness-context-offload.md).
 
 Harness-agnostic MCP server that brings the **Recursive Language Model (RLM)**
 paradigm to any agent that speaks MCP — Claude Code, Cursor, VS Code/Copilot,
