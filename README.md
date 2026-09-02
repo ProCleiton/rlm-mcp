@@ -1,5 +1,8 @@
 # rlm-mcp
 
+> **Installing and wiring a harness:** see
+> [`docs/install-and-usage.md`](docs/install-and-usage.md).
+
 Harness-agnostic MCP server that brings the **Recursive Language Model (RLM)**
 paradigm to any agent that speaks MCP — Claude Code, Cursor, VS Code/Copilot,
 Zed, Cline, LibreChat, custom loops.
@@ -84,9 +87,14 @@ the whole session tree).
 
 ## Installing and configuring
 
-Requires Python >= 3.10 and a client that supports MCP over stdio. Install the
-package (`uv tool install rlm-mcp` or `pip install rlm-mcp`) or run it on the
-fly with `uvx rlm-mcp`.
+Requires Python >= 3.10 and a client that supports MCP over stdio. The package
+is distributed **from GitHub only** — there is no PyPI release. Install it
+with `uv tool install --from git+https://github.com/ProCleiton/rlm-mcp
+rlm-mcp`, or clone the repository and run `./install.sh` (prefers `uv`, then
+`pipx`, then `pip`; never `sudo`). The examples below launch the installed
+`rlm-mcp` binary directly. See
+[`docs/install-and-usage.md`](docs/install-and-usage.md) for the full guide
+and ready-to-paste config blocks for omp, Claude Code, Cursor and VS Code.
 
 Claude Code (`.mcp.json` in the project root, or `claude mcp add`):
 
@@ -94,8 +102,8 @@ Claude Code (`.mcp.json` in the project root, or `claude mcp add`):
 {
   "mcpServers": {
     "rlm-mcp": {
-      "command": "uvx",
-      "args": ["rlm-mcp"]
+      "command": "rlm-mcp",
+      "args": []
     }
   }
 }
@@ -107,8 +115,8 @@ Cursor (`.cursor/mcp.json`):
 {
   "mcpServers": {
     "rlm-mcp": {
-      "command": "uvx",
-      "args": ["rlm-mcp"]
+      "command": "rlm-mcp",
+      "args": []
     }
   }
 }
@@ -120,8 +128,8 @@ VS Code / Copilot (`.vscode/mcp.json`):
 {
   "servers": {
     "rlm-mcp": {
-      "command": "uvx",
-      "args": ["rlm-mcp"]
+      "command": "rlm-mcp",
+      "args": []
     }
   }
 }
