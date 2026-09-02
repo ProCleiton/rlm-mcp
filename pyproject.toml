@@ -54,3 +54,8 @@ select = ["E", "F", "I", "UP", "B", "SIM", "RUF"]
 python_version = "3.10"
 strict = true
 files = ["src/rlm_mcp"]
+
+[dependency-groups]
+dev = [
+    "tiktoken>=0.14.0",
+]
