@@ -124,6 +124,25 @@ the risk, append --break-system-packages to the pip command above.
 EOF
 }
 
+premerge_hint() {
+    cat >&2 <<'EOF'
+HINT: the install from the default branch (main) failed. This usually means
+the rlm-mcp package has not been merged into the default branch yet. If you
+are installing before that merge, re-run with the feature branch:
+
+    ./install.sh --branch feat/rlm-over-mcp-core
+EOF
+}
+
+install_failed() {
+    # Targeted hint for the most likely cause when installing from the
+    # default branch: the package still lives on a feature branch.
+    if [ -z "$BRANCH" ]; then
+        premerge_hint
+    fi
+    exit 1
+}
+
 install_package() {
     local git_url="$1"
     local manager
@@ -132,17 +151,25 @@ install_package() {
         uv)
             echo "==> Installing with uv: uv tool install --from $git_url rlm-mcp"
             if [ "$FORCE" -eq 1 ]; then
-                uv tool install --force --from "$git_url" rlm-mcp
+                if ! uv tool install --force --from "$git_url" rlm-mcp; then
+                    install_failed
+                fi
             else
-                uv tool install --from "$git_url" rlm-mcp
+                if ! uv tool install --from "$git_url" rlm-mcp; then
+                    install_failed
+                fi
             fi
             ;;
         pipx)
             echo "==> Installing with pipx: pipx install $git_url"
             if [ "$FORCE" -eq 1 ]; then
-                pipx install --force "$git_url"
+                if ! pipx install --force "$git_url"; then
+                    install_failed
+                fi
             else
-                pipx install "$git_url"
+                if ! pipx install "$git_url"; then
+                    install_failed
+                fi
             fi
             ;;
         pip)
@@ -150,12 +177,12 @@ install_package() {
             if [ "$FORCE" -eq 1 ]; then
                 if ! python3 -m pip install --user --upgrade --force-reinstall "$git_url"; then
                     pip_failure_hint
-                    exit 1
+                    install_failed
                 fi
             else
                 if ! python3 -m pip install --user "$git_url"; then
                     pip_failure_hint
-                    exit 1
+                    install_failed
                 fi
             fi
             ;;

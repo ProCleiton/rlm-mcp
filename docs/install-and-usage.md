@@ -63,6 +63,10 @@ install that branch instead:
 uv tool install --from git+https://github.com/ProCleiton/rlm-mcp@feat/rlm-over-mcp-core rlm-mcp
 ```
 
+`install.sh` also detects this pre-merge state: if a default-branch
+(`main`) install fails, it prints a hint telling you to re-run with
+`--branch feat/rlm-over-mcp-core`.
+
 Verify the install:
 
 ```bash
