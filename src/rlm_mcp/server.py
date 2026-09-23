@@ -30,6 +30,7 @@ from mcp.server.mcpserver import MCPServer
 
 from rlm_mcp import __version__
 from rlm_mcp.playbook import INSTRUCTIONS, PLAYBOOK
+from rlm_mcp.sandbox.driver import KEEP_ENV
 from rlm_mcp.session import SessionError, SessionManager
 from rlm_mcp.types import Limits, Mode, OpenSpec, SubResult
 
@@ -37,6 +38,13 @@ from rlm_mcp.types import Limits, Mode, OpenSpec, SubResult
 #: values ever logged (only key names appear in error messages). Minimum
 #: length 2, maximum 64 chars: ``^[A-Z][A-Z0-9_]{1,63}$``.
 _TRUSTED_ENV_KEY_RE = re.compile(r"^[A-Z][A-Z0-9_]{1,63}$")
+
+#: ``trusted_env`` keys that would override the driver's own scrubbed
+#: environment. Single source of truth: derived from ``KEEP_ENV`` in
+#: ``sandbox/driver.py`` (keep both in sync by construction). Rejected
+#: loudly before any session is created; the driver's silent drop stays
+#: as defense in depth. Never log values, only key names.
+_RESERVED_ENV_KEYS = frozenset(KEEP_ENV)
 
 
 def _validate_trusted_env(
@@ -46,9 +54,11 @@ def _validate_trusted_env(
 
     ``mode`` must be ``"doc"`` or ``"exec"``; ``trusted_env`` is only
     accepted with ``mode == "exec"``. Keys must match
-    ``^[A-Z][A-Z0-9_]{1,63}$`` (2-64 chars, uppercase start) and must not
+    ``^[A-Z][A-Z0-9_]{1,63}$`` (2-64 chars, uppercase start), must not
     start with ``RLM_`` (reserved for the driver's internal pipe-fd/rlimit
-    params). Values must be strings. Never logs values, only key names.
+    params), and must not override a reserved sandbox variable (``KEEP_ENV``:
+    ``PATH``, ``HOME``, ``LANG``, ``TZ``, ``TMPDIR``). Values must be
+    strings. Never logs values, only key names.
     """
     if mode not in ("doc", "exec"):
         raise ValueError(f"invalid mode {mode!r}: expected 'doc' or 'exec'")
@@ -66,10 +76,15 @@ def _validate_trusted_env(
             raise ValueError(f"invalid trusted_env key {key!r}: must match {pattern}")
         if key.startswith("RLM_"):
             raise ValueError(f"invalid trusted_env key {key!r}: 'RLM_' prefix is reserved")
+        if key in _RESERVED_ENV_KEYS:
+            raise ValueError(
+                f"invalid trusted_env key {key!r}: overrides a reserved sandbox variable"
+            )
         if not isinstance(value, str):
             raise ValueError(f"invalid trusted_env entry {key!r}: value must be a string")
         validated[key] = value
     return validated
+
 
 #: Log levels accepted by the SDK's MCPServer constructor.
 LogLevel = Literal["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"]
@@ -82,6 +97,7 @@ _TOOL_NAMES: tuple[str, ...] = (
     "rlm_status",
     "rlm_close",
 )
+
 
 def _to_int(value: object) -> int:
     if isinstance(value, bool) or not isinstance(value, (int, float, str)):
@@ -223,9 +239,7 @@ def _register_tools(server: MCPServer, manager: SessionManager, base_limits: Lim
             "exhausted)."
         ),
     )
-    async def rlm_resume(
-        session_id: str, results: list[dict[str, Any]]
-    ) -> dict[str, Any]:
+    async def rlm_resume(session_id: str, results: list[dict[str, Any]]) -> dict[str, Any]:
         try:
             sub_results: list[SubResult] = []
             for item in results:

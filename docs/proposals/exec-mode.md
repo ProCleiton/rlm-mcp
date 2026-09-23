@@ -45,6 +45,20 @@ após a anterior estar validada em uso real.
    `server.py` (`rlm_open`) ganha o parâmetro `trusted_env`, com validação
    de nomes via regex antes de repassar. DESIGN G3 segue intacto: o default
    (`doc`, sem `trusted_env`) nunca vê credenciais.
+   Correções pós-simulação real (branch `fix/exec-mode-env-guards`):
+   `trusted_env` com chave de `KEEP_ENV` (`PATH`, `HOME`, `LANG`, `TZ`,
+   `TMPDIR`) ou prefixo `RLM_` é rejeitado com erro claro ANTES de qualquer
+   sessão ser criada — em `server._validate_trusted_env` (fronteira
+   `rlm_open`) e replicado em `SessionManager.open` para chamadas diretas
+   via `OpenSpec` não passarem pela validação do server; o drop silencioso
+   em `_build_sandbox_env` permanece como defesa em profundidade. O env do
+   sandbox é scrub por allowlist: `PATH`/`HOME`/etc. visíveis no filho são
+   os valores do host herdados via `scrub_env()`, nunca valores arbitrários
+   — `trusted_env` não pode alterá-los. `RLIMIT_NPROC`: sessões `exec` usam
+   o default mais alto `DEFAULT_RLIMIT_NPROC_EXEC = 2048` (modo `doc`
+   continua em 256); a env explícita `RLM_RLIMIT_NPROC` do operador sempre
+   vence ambos os defaults. Hosts muito carregados podem ainda precisar
+   elevar `RLM_RLIMIT_NPROC` manualmente mesmo com o novo default.
 3. Tetos elevados por sessão-canal já são suportados hoje via
    `rlm_open(limits={...})` (`server._merge_limits`) — documentar como usar
    isso no modo `exec` (ex. `max_wall_seconds` alto para builds longos),

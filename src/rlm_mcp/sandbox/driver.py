@@ -37,6 +37,13 @@ DEFAULT_RLIMIT_AS_BYTES = 1 << 30  # 1 GiB of address space
 DEFAULT_RLIMIT_CPU_SECONDS = 600
 DEFAULT_RLIMIT_FSIZE_BYTES = 64 << 20  # 64 MiB of file writes
 DEFAULT_RLIMIT_NPROC = 256
+#: Higher ``RLIMIT_NPROC`` default for ``mode="exec"`` sessions only. Exec
+#: sessions fork real subprocesses; 256 (the doc default, unchanged) is too
+#: low on shared hosts where the operator's UID already owns hundreds of
+#: tasks/threads. The explicit ``RLM_RLIMIT_NPROC`` operator knob always wins
+#: over both defaults. Hosts under extreme load may still need to raise
+#: ``RLM_RLIMIT_NPROC`` manually even with this higher default.
+DEFAULT_RLIMIT_NPROC_EXEC = 2048
 
 #: How much of the agent's captured stderr to keep for diagnostics.
 _STDERR_TAIL_BYTES = 64 * 1024
@@ -74,7 +81,11 @@ def _env_int(name: str, default: int) -> int:
 
 
 def _build_sandbox_env(
-    limits: Limits, in_fd: int, out_fd: int, extra_env: Mapping[str, str] | None = None
+    limits: Limits,
+    in_fd: int,
+    out_fd: int,
+    extra_env: Mapping[str, str] | None = None,
+    mode: str = "doc",
 ) -> dict[str, str]:
     """Build the scrubbed sandbox environment plus internal ``RLM_*`` params.
 
@@ -82,8 +93,16 @@ def _build_sandbox_env(
     internal ``RLM_*`` entries. Entries whose key starts with ``RLM_`` or
     that matches a ``KEEP_ENV`` name (``PATH``, ``HOME``, ``LANG``, ``TZ``,
     ``TMPDIR``) are silently dropped so callers can never override the pipe
-    fds, output cap, rlimits, or the driver's own scrubbed values.
+    fds, output cap, rlimits, or the driver's own scrubbed values. That drop
+    is defense in depth: ``server._validate_trusted_env`` already rejects
+    such keys loudly before any session is created when the call goes
+    through ``rlm_open``.
+
+    ``mode`` only selects the ``RLIMIT_NPROC`` default (``"exec"`` gets the
+    higher ``DEFAULT_RLIMIT_NPROC_EXEC``); an explicit ``RLM_RLIMIT_NPROC``
+    operator env var always wins, and ``mode="doc"`` keeps the 256 default.
     """
+    nproc_default = DEFAULT_RLIMIT_NPROC_EXEC if mode == "exec" else DEFAULT_RLIMIT_NPROC
     env = scrub_env()
     env.update(
         {
@@ -97,7 +116,7 @@ def _build_sandbox_env(
             "RLM_RLIMIT_FSIZE_BYTES": str(
                 _env_int("RLM_RLIMIT_FSIZE_BYTES", DEFAULT_RLIMIT_FSIZE_BYTES)
             ),
-            "RLM_RLIMIT_NPROC": str(_env_int("RLM_RLIMIT_NPROC", DEFAULT_RLIMIT_NPROC)),
+            "RLM_RLIMIT_NPROC": str(_env_int("RLM_RLIMIT_NPROC", nproc_default)),
         }
     )
     if extra_env:
@@ -122,8 +141,9 @@ class LocalDriver:
 
     ``extra_env`` carries opt-in reinjected variables (exec mode only,
     already validated upstream). It is applied after the scrub and the
-    internal ``RLM_*`` params; ``RLM_*``-prefixed keys are ignored, never
-    overlaid.
+    internal ``RLM_*`` params; ``RLM_*``-prefixed keys and ``KEEP_ENV`` names
+    are ignored, never overlaid (defense in depth behind the server-side
+    pre-open rejection). ``mode`` only selects the ``RLIMIT_NPROC`` default.
     """
 
     def __init__(
@@ -131,10 +151,12 @@ class LocalDriver:
         agent_script: str | os.PathLike[str],
         limits: Limits,
         extra_env: Mapping[str, str] | None = None,
+        mode: str = "doc",
     ):
         self._agent_script = os.path.abspath(os.fspath(agent_script))
         self._limits = limits
         self._extra_env = dict(extra_env) if extra_env else None
+        self._mode = mode
         self._proc: asyncio.subprocess.Process | None = None
         self._reader: asyncio.StreamReader | None = None
         self._read_transport: asyncio.BaseTransport | None = None
@@ -203,7 +225,7 @@ class LocalDriver:
         in_r, in_w = os.pipe()  # supervisor -> agent
         out_r, out_w = os.pipe()  # agent -> supervisor
         err_r, err_w = os.pipe()  # agent stderr -> supervisor (diagnostics)
-        env = _build_sandbox_env(self._limits, in_r, out_w, self._extra_env)
+        env = _build_sandbox_env(self._limits, in_r, out_w, self._extra_env, self._mode)
         try:
             self._proc = await asyncio.create_subprocess_exec(
                 sys.executable,
@@ -272,9 +294,7 @@ class LocalDriver:
             try:
                 line = await asyncio.wait_for(self._reader.readline(), timeout)
             except asyncio.TimeoutError:
-                raise SandboxTimeout(
-                    f"no frame from sandbox within {timeout:g}s"
-                ) from None
+                raise SandboxTimeout(f"no frame from sandbox within {timeout:g}s") from None
             except (ConnectionError, asyncio.IncompleteReadError):
                 return None
             except ValueError as exc:  # StreamReader limit exceeded

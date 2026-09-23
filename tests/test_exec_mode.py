@@ -15,7 +15,7 @@ import pytest
 from mcp.server.mcpserver import MCPServer
 from mcp.server.mcpserver.exceptions import ToolError
 
-from rlm_mcp.sandbox.driver import _build_sandbox_env
+from rlm_mcp.sandbox.driver import DEFAULT_RLIMIT_NPROC, _build_sandbox_env
 from rlm_mcp.server import _validate_trusted_env, build_server
 from rlm_mcp.session import SessionManager
 from rlm_mcp.types import Limits, OpenSpec
@@ -50,9 +50,7 @@ def test_open_spec_defaults_preserve_doc_behavior() -> None:
 
 
 def test_build_sandbox_env_ignores_rlm_prefixed_extra() -> None:
-    env = _build_sandbox_env(
-        Limits(), 5, 6, {"FOO_BAR": "x", "RLM_IN_FD": "999", "RLM_EVIL": "1"}
-    )
+    env = _build_sandbox_env(Limits(), 5, 6, {"FOO_BAR": "x", "RLM_IN_FD": "999", "RLM_EVIL": "1"})
     assert env["FOO_BAR"] == "x"
     assert env["RLM_IN_FD"] == "5"
     assert env.get("RLM_EVIL") != "1"
@@ -126,6 +124,7 @@ async def test_server_rejects_rlm_prefixed_key(server: MCPServer) -> None:
     assert "RLM_" in payload["error"]["message"]
     assert SECRET not in payload["error"]["message"]
 
+
 async def test_server_rejects_trusted_env_with_doc_mode(server: MCPServer) -> None:
     payload = await _call(
         server, "rlm_open", {"text": "x", "mode": "doc", "trusted_env": {"MY_VAR": SECRET}}
@@ -141,6 +140,7 @@ async def test_server_rejects_invalid_mode(server: MCPServer) -> None:
     # rejection naming the offending value), not an error payload.
     with pytest.raises(ToolError, match="bogus"):
         await _call(server, "rlm_open", {"text": "x", "mode": "bogus"})
+
 
 def test_validate_trusted_env_strict_key_shape() -> None:
     # valid: 2..64 chars, uppercase start
@@ -160,6 +160,7 @@ def test_validate_trusted_env_strict_key_shape() -> None:
 
 def test_build_sandbox_env_drops_keep_env_and_rlm() -> None:
     import os
+
     baseline = dict(os.environ)
     try:
         os.environ["PATH"] = "/orig-path"
@@ -189,6 +190,7 @@ def test_build_sandbox_env_drops_keep_env_and_rlm() -> None:
 
 async def test_open_trajectory_records_mode_and_keys(mgr: SessionManager) -> None:
     import json
+
     result = await mgr.open(
         OpenSpec(text="hi", mode="exec", trusted_env={"ZZ_VAR": "v", "AA_VAR": "w"})
     )
@@ -206,3 +208,83 @@ async def test_open_trajectory_records_mode_and_keys(mgr: SessionManager) -> Non
         assert json.dumps(evt["trusted_env_keys"]) == '["AA_VAR", "ZZ_VAR"]'
     finally:
         await mgr.close(sid)
+
+
+def test_validate_trusted_env_rejects_reserved_keep_env_keys_without_value_leak() -> None:
+    for key in ("PATH", "HOME", "LANG", "TZ", "TMPDIR"):
+        with pytest.raises(ValueError, match="reserved"):
+            _validate_trusted_env("exec", {key: SECRET})
+        try:
+            _validate_trusted_env("exec", {key: SECRET})
+        except ValueError as exc:
+            assert SECRET not in str(exc)
+            assert key in str(exc)
+        else:  # pragma: no cover - the raises above already proves rejection
+            raise AssertionError(f"reserved key {key} was accepted")
+
+
+async def test_server_rejects_reserved_keep_env_key_before_session_created(
+    server: MCPServer,
+) -> None:
+    for key in ("PATH", "TMPDIR"):
+        payload = await _call(
+            server, "rlm_open", {"text": "x", "mode": "exec", "trusted_env": {key: "/tmp/evil"}}
+        )
+        assert "error" in payload
+        assert payload["error"]["type"] == "invalid_arguments"
+        assert "reserved" in payload["error"]["message"]
+        assert "session_id" not in payload
+        assert "/tmp/evil" not in payload["error"]["message"]
+
+
+async def test_session_manager_direct_open_rejects_reserved_key_no_spawn(
+    mgr: SessionManager,
+) -> None:
+    from rlm_mcp.session import SessionError
+
+    before = len(mgr._sessions)
+    with pytest.raises(SessionError, match="reserved"):
+        await mgr.open(OpenSpec(text="hi", mode="exec", trusted_env={"PATH": "/tmp/evil"}))
+    assert len(mgr._sessions) == before
+
+
+def test_build_sandbox_env_nproc_default_exec_higher_doc_unchanged(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from rlm_mcp.sandbox.driver import DEFAULT_RLIMIT_NPROC_EXEC
+
+    monkeypatch.delenv("RLM_RLIMIT_NPROC", raising=False)
+    doc_env = _build_sandbox_env(Limits(), 5, 6, None)
+    exec_env = _build_sandbox_env(Limits(), 5, 6, None, mode="exec")
+    assert doc_env["RLM_RLIMIT_NPROC"] == str(DEFAULT_RLIMIT_NPROC) == "256"
+    assert exec_env["RLM_RLIMIT_NPROC"] == str(DEFAULT_RLIMIT_NPROC_EXEC)
+    assert int(exec_env["RLM_RLIMIT_NPROC"]) > int(doc_env["RLM_RLIMIT_NPROC"])
+    monkeypatch.setenv("RLM_RLIMIT_NPROC", "4096")
+    assert _build_sandbox_env(Limits(), 5, 6, None)["RLM_RLIMIT_NPROC"] == "4096"
+    assert _build_sandbox_env(Limits(), 5, 6, None, mode="exec")["RLM_RLIMIT_NPROC"] == "4096"
+
+
+async def test_effective_nproc_rlimit_exec_vs_doc_via_real_sandbox(
+    mgr: SessionManager, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from rlm_mcp.sandbox.driver import DEFAULT_RLIMIT_NPROC_EXEC
+
+    monkeypatch.delenv("RLM_RLIMIT_NPROC", raising=False)
+    doc_open = await mgr.open(OpenSpec(text="doc-nproc"))
+    exec_open = await mgr.open(OpenSpec(text="exec-nproc", mode="exec"))
+    assert doc_open.status == "ok" and exec_open.status == "ok"
+    assert doc_open.session_id is not None and exec_open.session_id is not None
+    try:
+        doc_step = await mgr.exec(
+            doc_open.session_id, "import os; print(os.environ.get('RLM_RLIMIT_NPROC'))"
+        )
+        exec_step = await mgr.exec(
+            exec_open.session_id, "import os; print(os.environ.get('RLM_RLIMIT_NPROC'))"
+        )
+        assert doc_step.status == "ok"
+        assert exec_step.status == "ok"
+        assert (doc_step.stdout or "").strip() == str(DEFAULT_RLIMIT_NPROC) == "256"
+        assert (exec_step.stdout or "").strip() == str(DEFAULT_RLIMIT_NPROC_EXEC)
+    finally:
+        await mgr.close(doc_open.session_id)
+        await mgr.close(exec_open.session_id)
