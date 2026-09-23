@@ -1,9 +1,9 @@
 """MCP adapter layer for rlm-mcp.
 
-Exposes the RLM paradigm (docs/DESIGN.md, section 5) as six tools
-(``rlm_open``, ``rlm_exec``, ``rlm_resume``, ``rlm_peek``, ``rlm_status``,
-``rlm_close``), one prompt (``rlm_playbook``) and one resource
-(``rlm://trajectory/{root_id}``).
+Exposes the RLM paradigm (docs/DESIGN.md, section 5) as eight tools
+(`rlm_open`, `rlm_exec`, `rlm_exec_async`, `rlm_wait`, `rlm_resume`,
+`rlm_peek`, `rlm_status`, `rlm_close`), one prompt (`rlm_playbook`) and one
+resource (`rlm://trajectory/{root_id}`).
 
 This module is a thin, dumb adapter over ``SessionManager`` (the only port
 the MCP layer uses, docs/DESIGN.md section 8): it keeps no state of its own
@@ -88,10 +88,11 @@ def _validate_trusted_env(
 
 #: Log levels accepted by the SDK's MCPServer constructor.
 LogLevel = Literal["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"]
-
 _TOOL_NAMES: tuple[str, ...] = (
     "rlm_open",
     "rlm_exec",
+    "rlm_exec_async",
+    "rlm_wait",
     "rlm_resume",
     "rlm_peek",
     "rlm_status",
@@ -172,10 +173,8 @@ def _merge_limits(base: Limits, overrides: Mapping[str, object] | None) -> Limit
         max_output_chars=cast(int, updates.get("max_output_chars", base.max_output_chars)),
         max_errors=cast(int, updates.get("max_errors", base.max_errors)),
     )
-
-
 def _register_tools(server: MCPServer, manager: SessionManager, base_limits: Limits) -> None:
-    """Register the six RLM tools, each delegating to ``manager``."""
+    """Register the eight RLM tools, each delegating to ``manager``."""
 
     @server.tool(
         name="rlm_open",
@@ -226,6 +225,42 @@ def _register_tools(server: MCPServer, manager: SessionManager, base_limits: Lim
         try:
             result = await manager.exec(session_id, code)
             return result.to_dict()
+        except SessionError as exc:
+            return _session_error_payload(exc)
+
+    @server.tool(
+        name="rlm_exec_async",
+        description=(
+            "Dispatch Python `code` in the session's REPL without awaiting "
+            "completion. Returns `{handle, state}` immediately; collect the "
+            "terminal step result (ok/needs_llm/final/error/exhausted) with "
+            "`rlm_wait(handle)`. Guards match `rlm_exec` (idle state, syntax, "
+            "reserved names, budget); collect-before-reexec applies."
+        ),
+    )
+    async def rlm_exec_async(session_id: str, code: str) -> dict[str, Any]:
+        try:
+            return await manager.exec_async(session_id, code)
+        except SessionError as exc:
+            return _session_error_payload(exc)
+
+    @server.tool(
+        name="rlm_wait",
+        description=(
+            "Collect one dispatched `rlm_exec_async` job. A finished job "
+            "returns the terminal step result; a still-running job past "
+            "`timeout` seconds returns `{status: 'pending', elapsed}` "
+            "without cancelling -- call again later. Unknown or already "
+            "collected handles come back as error payloads."
+        ),
+    )
+    async def rlm_wait(handle: str, timeout: float = 30.0) -> dict[str, Any]:
+        try:
+            if isinstance(timeout, bool) or not isinstance(timeout, (int, float)):
+                return _error_payload("invalid_arguments", "timeout must be a number")
+            if timeout < 0:
+                return _error_payload("invalid_arguments", "timeout must be >= 0")
+            return await manager.wait(handle, float(timeout))
         except SessionError as exc:
             return _session_error_payload(exc)
 

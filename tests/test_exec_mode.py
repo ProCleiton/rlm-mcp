@@ -1,14 +1,22 @@
-"""Phase 1 exec-mode tests: doc default preserved, trusted_env opt-in.
+"""Exec-mode tests: Phase 1 (doc default, trusted_env opt-in) + Phase 2 (async exec).
 
-Covers the blocking requirements: (1) doc-default regression, (2) exec +
-trusted_env visible via a real ``rlm_exec`` reading ``os.environ``,
-(3) ``RLM_`` keys rejected, (4) trusted_env with mode=doc rejected.
-Error payloads must never leak secret values, only key names.
+Phase 1 covers the blocking requirements: (1) doc-default regression,
+(2) exec + trusted_env visible via a real ``rlm_exec`` reading
+``os.environ``, (3) ``RLM_`` keys rejected, (4) trusted_env with mode=doc
+rejected. Error payloads must never leak secret values, only key names.
+
+Phase 2 covers ``exec_async``/``wait`` over the REAL sandbox (no mocks
+where subprocess/timing is involved): fast dispatch+collect parity with
+sync ``exec``, ``pending`` on a slow job + later collection, ``close``
+cancelling a pending job with no orphan process, ``needs_llm`` via async
+followed by sync ``resume``, and wall-clock accounting across spaced polls.
 """
 
 from __future__ import annotations
 
+import asyncio
 import json
+import os
 from pathlib import Path
 
 import pytest
@@ -288,3 +296,179 @@ async def test_effective_nproc_rlimit_exec_vs_doc_via_real_sandbox(
     finally:
         await mgr.close(doc_open.session_id)
         await mgr.close(exec_open.session_id)
+
+async def _open_sid(mgr: SessionManager, **overrides: object) -> str:
+    result = await mgr.open(OpenSpec(text="phase2", **overrides))  # type: ignore[arg-type]
+    assert result.status == "ok"
+    assert result.session_id is not None
+    return result.session_id
+
+
+async def test_async_fast_roundtrip_matches_sync_exec(mgr: SessionManager) -> None:
+    """Dispatch ``FINAL("ok")`` async; ``wait`` returns the sync-identical result."""
+    sid = await _open_sid(mgr)
+    try:
+        dispatched = await mgr.exec_async(sid, 'FINAL("ok-async")')
+        assert dispatched["handle"] == sid
+        assert dispatched["state"] == "running"
+        assert mgr.status(sid).to_dict()["state"] == "running"
+        collected = await mgr.wait(sid, timeout=30.0)
+        assert collected["status"] == "final"
+        assert collected["answer"] == "ok-async"
+        assert mgr.status(sid).to_dict()["state"] == "final"
+    finally:
+        await mgr.close(sid)
+
+
+async def test_async_slow_job_pending_then_complete(mgr: SessionManager) -> None:
+    """``time.sleep(2)`` in the sandbox: first ``wait(0.3)`` is pending, later poll completes."""
+    sid = await _open_sid(mgr)
+    try:
+        dispatched = await mgr.exec_async(sid, "import time\ntime.sleep(2)\nprint('slow-done')")
+        assert dispatched["state"] == "running"
+        first = await mgr.wait(sid, timeout=0.3)
+        assert first["status"] == "pending"
+        assert first["elapsed"] >= 0.3
+        # Session untouched by the pending poll: still running, re-waitable.
+        assert mgr.status(sid).to_dict()["state"] == "running"
+        done = await mgr.wait(sid, timeout=30.0)
+        assert done["status"] == "ok"
+        assert "slow-done" in (done.get("stdout") or "")
+        assert mgr.status(sid).to_dict()["state"] == "idle"
+        # Second exec works normally after collection (slot cleared).
+        again = await mgr.exec(sid, "print('after-async')")
+        assert again.status == "ok"
+        assert "after-async" in (again.stdout or "")
+    finally:
+        await mgr.close(sid)
+
+
+async def test_async_double_dispatch_refused_until_collected(mgr: SessionManager) -> None:
+    """A second ``exec``/``exec_async`` while a job is outstanding is refused in-flow."""
+    sid = await _open_sid(mgr)
+    try:
+        first = await mgr.exec_async(sid, "import time\ntime.sleep(2)\nprint('one')")
+        assert "error" not in first
+        second = await mgr.exec_async(sid, "print('two')")
+        assert "error" in second
+        assert second["error"]["status"] == "error"  # type: ignore[index]
+        sync_refused = await mgr.exec(sid, "print('three')")
+        assert sync_refused.status == "error"
+        done = await mgr.wait(sid, timeout=30.0)
+        assert done["status"] == "ok"
+    finally:
+        await mgr.close(sid)
+
+
+async def test_close_cancels_pending_async_job_no_orphan(mgr: SessionManager) -> None:
+    """``close`` on a session with a pending job cancels + kills the sandbox (no orphan)."""
+    sid = await _open_sid(mgr)
+    driver = mgr._sessions[sid].driver
+    proc = driver._proc
+    assert proc is not None
+    pid = proc.pid
+    dispatched = await mgr.exec_async(sid, "import time\ntime.sleep(30)\nprint('never')")
+    assert dispatched["state"] == "running"
+    await asyncio.sleep(0.5)  # let the sandbox actually enter the sleep
+    closed = await mgr.close(sid)
+    assert closed == [sid]
+    assert sid not in mgr._sessions
+    assert not driver.alive
+    # The OS process is really gone (reaped): no live pid, no zombie.
+    assert proc.returncode is not None
+    with pytest.raises(ProcessLookupError):
+        os.kill(pid, 0)
+    with pytest.raises(Exception, match="unknown session"):
+        await mgr.wait(sid, timeout=1.0)
+
+
+async def test_close_parent_cancels_child_async_job(mgr: SessionManager) -> None:
+    """Parent ``close`` cancels a child's pending async job and closes the subtree."""
+    from rlm_mcp.session import SessionError
+
+    parent = await _open_sid(mgr)
+    child_open = await mgr.open(OpenSpec(text="kid", parent_session_id=parent))
+    assert child_open.session_id is not None
+    child = child_open.session_id
+    try:
+        dispatched = await mgr.exec_async(child, "import time\ntime.sleep(30)")
+        assert dispatched["state"] == "running"
+        await asyncio.sleep(0.5)
+        closed = await mgr.close(parent)
+        assert sorted(closed) == sorted([parent, child])
+    finally:
+        with pytest.raises(SessionError):
+            await mgr.close(parent)
+
+
+async def test_async_needs_llm_then_sync_resume_completes(mgr: SessionManager) -> None:
+    """``needs_llm`` via async collects normally; sync ``resume`` finishes the session."""
+    from rlm_mcp.types import SubResult
+
+    sid = await _open_sid(mgr)
+    dispatched = await mgr.exec_async(sid, "ans = llm_query('async-q')\nFINAL('got:' + ans)")
+    assert dispatched["state"] == "running"
+    parked = await mgr.wait(sid, timeout=30.0)
+    assert parked["status"] == "needs_llm"
+    assert parked["requests"][0]["id"] == "q1"
+    assert mgr.status(sid).to_dict()["state"] == "parked"
+    done = await mgr.resume(sid, [SubResult(id="q1", text="hello")])
+    assert done.status == "final"
+    assert done.answer == "got:hello"
+    await mgr.close(sid)
+
+
+async def test_async_unknown_and_double_collect_raise(mgr: SessionManager) -> None:
+    """``wait`` on an unknown handle or an already-collected job raises clearly."""
+    from rlm_mcp.session import SessionError
+
+    with pytest.raises(Exception, match="unknown session"):
+        await mgr.wait("rlm_does_not_exist", timeout=1.0)
+    sid = await _open_sid(mgr)
+    await mgr.exec_async(sid, 'FINAL("once")')
+    done = await mgr.wait(sid, timeout=30.0)
+    assert done["status"] == "final"
+    with pytest.raises(SessionError, match=r"already collected|no pending"):
+        await mgr.wait(sid, timeout=1.0)
+    await mgr.close(sid)
+
+async def test_async_wall_clock_counts_execution_not_poll_gaps(mgr: SessionManager) -> None:
+    """Wall clock banks the ~2s sandbox sleep once, not the idle gap between polls."""
+    sid = await _open_sid(mgr)
+    try:
+        before = mgr.status(sid).to_dict()["spent"]["wall_seconds"]
+        await mgr.exec_async(sid, "import time\ntime.sleep(2)\nprint('w')")
+        first = await mgr.wait(sid, timeout=0.3)
+        assert first["status"] == "pending"
+        await asyncio.sleep(1.0)  # idle harness gap: must NOT inflate the ledger
+        mid_wall = mgr.status(sid).to_dict()["spent"]["wall_seconds"]
+        done = await mgr.wait(sid, timeout=30.0)
+        assert done["status"] == "ok"
+        after = mgr.status(sid).to_dict()["spent"]["wall_seconds"]
+        slept = after - before
+        assert 1.5 <= slept <= 6.0, f"wall {slept} should be ~2s of sandbox sleep"
+        # The 1s harness-side gap added less than ~0.9s extra beyond the sleep.
+        assert (after - mid_wall) <= 2.5
+    finally:
+        await mgr.close(sid)
+
+
+async def test_server_exec_async_and_wait_roundtrip(server: MCPServer) -> None:
+    """MCP surface: ``rlm_exec_async`` + ``rlm_wait`` through the real server machinery."""
+    tools = {tool.name for tool in await server.list_tools()}
+    assert "rlm_exec_async" in tools
+    assert "rlm_wait" in tools
+    opened = await _call(server, "rlm_open", {"text": "srv-async"})
+    sid = opened["session_id"]
+    dispatched = await _call(
+        server, "rlm_exec_async", {"session_id": sid, "code": 'FINAL("srv-ok")'}
+    )
+    assert dispatched["handle"] == sid
+    assert dispatched["state"] == "running"
+    collected = await _call(server, "rlm_wait", {"handle": sid, "timeout": 30})
+    assert collected["status"] == "final"
+    assert collected["answer"] == "srv-ok"
+    pending_probe = await _call(server, "rlm_wait", {"handle": sid, "timeout": 1})
+    assert "error" in pending_probe
+    closed = await _call(server, "rlm_close", {"session_id": sid})
+    assert closed == {"closed": [sid]}

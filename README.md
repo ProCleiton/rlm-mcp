@@ -164,7 +164,7 @@ uv run pytest
 uv run rlm-mcp --help
 ```
 
-Layout: `src/rlm_mcp/server.py` is the thin MCP adapter (six tools, one
+Layout: `src/rlm_mcp/server.py` is the thin MCP adapter (eight tools, one
 prompt, one resource); the core (`session.py`, `sandbox/`, `budget.py`,
 `trajectory.py`, `types.py`) implements sessions, the REPL driver and the
 budget ledgers. Read `docs/DESIGN.md` for the protocol.

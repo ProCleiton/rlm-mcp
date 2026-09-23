@@ -22,6 +22,7 @@ Errors split in two channels:
 from __future__ import annotations
 
 import ast
+import asyncio
 import contextlib
 import json
 import logging
@@ -31,6 +32,7 @@ import time
 from collections import Counter
 from collections.abc import Sequence
 from dataclasses import dataclass, field
+from typing import Any
 
 from rlm_mcp.budget import BudgetLedger
 from rlm_mcp.context import load_context
@@ -413,6 +415,14 @@ class _Session:
     stdout_cache: str = ""
     created: float = field(default_factory=time.monotonic)
     last_used: float = field(default_factory=time.monotonic)
+    # Phase 2 (async exec): at most one dispatched-but-uncollected job per
+    # session. ``active_job`` is the ``asyncio.Task`` driving ``_drive`` in
+    # the background; ``job_started`` is its dispatch time (monotonic) for
+    # the ``pending`` elapsed report. The session stays ``running`` while a
+    # job is outstanding, so every existing state guard (exec/resume/peek/
+    # close/sweep) keeps working unchanged. Collect via ``wait()``.
+    active_job: asyncio.Task[StepResult] | None = None
+    job_started: float = 0.0
 
 
 class SessionManager:
@@ -818,9 +828,14 @@ class SessionManager:
             budget=_budget_payload(ledger),
         )
 
-    async def exec(self, sid: str, code: str) -> StepResult:
-        session = self._require(sid)
-        self._touch(session)
+    def _prepare_exec(self, session: _Session, sid: str, code: object) -> ast.AST | StepResult:
+        """Shared ``exec``/``exec_async`` guards (Phase 2: no drift between them).
+
+        Returns the parsed tree when the step may start, otherwise the same
+        in-flow ``StepResult(status="error")`` refusal ``exec`` always
+        returned. Covers state (only ``idle`` starts; a pending async job
+        also refuses), syntax and reserved-name rebinding.
+        """
         spent = session.ledger.snapshot()
         if not isinstance(code, str):
             return _error_result("InvalidState", "exec code must be a string", spent)
@@ -844,6 +859,13 @@ class SessionManager:
                 f"session {sid} is dead: its sandbox was lost; open a new session",
                 spent,
             )
+        if session.active_job is not None:
+            return _error_result(
+                "InvalidState",
+                f"session {sid} has a pending async exec job; "
+                "collect it with rlm_wait before starting a new exec",
+                spent,
+            )
         if session.state != "idle":
             return _error_result(
                 "InvalidState", f"session {sid} is not idle (state={session.state})", spent
@@ -859,12 +881,32 @@ class SessionManager:
                 "rebinding reserved sandbox names is not allowed: " + ", ".join(names),
                 spent,
             )
+        return tree
 
+    def _begin_exec_step(self, session: _Session, code: str) -> StepResult | None:
+        """Charge one iteration, check the tree budget and log the step.
+
+        Returns the ``exhausted`` result when the charge blows the budget,
+        else ``None`` -- the caller then opens the ledger window and
+        dispatches (sync ``await _drive`` or async background task).
+        """
         session.ledger.charge_iteration()
         reason = session.ledger.check()
         if reason:
             return self._exhausted(session, reason)
         self._log(session, "exec", code=cut_text(code, LOG_CAP))
+        return None
+
+    async def exec(self, sid: str, code: str) -> StepResult:
+        session = self._require(sid)
+        self._touch(session)
+        prepared = self._prepare_exec(session, sid, code)
+        if isinstance(prepared, StepResult):
+            return prepared
+        assert isinstance(code, str)
+        exhausted = self._begin_exec_step(session, code)
+        if exhausted is not None:
+            return exhausted
 
         session.state = "running"
         session.ledger.resume()
@@ -888,6 +930,110 @@ class SessionManager:
             session.ledger.pause()
             if session.state == "running":
                 session.state = "dead"
+
+    async def _run_async_job(self, session: _Session, started: float) -> StepResult:
+        """Background body of one ``exec_async`` job: drive to completion.
+
+        The ledger window opened at dispatch stays open for the whole real
+        execution and closes here (not when the caller polls ``wait``), so
+        wall-clock accounting matches the sync ``exec`` semantics. The
+        ``running``-to-``dead`` safety net of ``exec`` is replicated: if the
+        driver yields no terminal frame, the session is ``dead``.
+        """
+        try:
+            return await self._drive(session, started)
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            logger.exception("supervisor failure in async job of session %s", session.sid)
+            session.driver.kill()
+            session.state = "dead"
+            return _error_result(
+                "InternalError",
+                f"unexpected supervisor failure: {type(exc).__name__}: {exc}",
+                session.ledger.snapshot(),
+            )
+        finally:
+            session.ledger.pause()
+            if session.state == "running":
+                session.state = "dead"
+
+    async def exec_async(self, sid: str, code: str) -> dict[str, object]:
+        """Dispatch ``code`` without awaiting completion (Phase 2).
+
+        Same guards as :meth:`exec` (idle state, syntax, reserved names,
+        iteration charge, budget check), then sends the ``exec`` frame and
+        spawns a background ``asyncio.Task`` driving ``_drive`` to the
+        terminal frame. Returns ``{"handle", "state"}`` immediately; the
+        session stays ``running`` and the single outstanding job is
+        collected with :meth:`wait`.
+
+        Design choices (documented per contract): the handle IS the
+        ``session_id`` -- only one async job per session is possible
+        because a non-``idle`` state refuses any new ``exec``; the state
+        stays plain ``running`` (no new ``dispatched`` state) so every
+        existing guard (``exec``/``resume``/``peek``/``close``/``sweep``)
+        applies to a dispatched job with zero changes.
+        """
+        session = self._require(sid)
+        self._touch(session)
+        prepared = self._prepare_exec(session, sid, code)
+        if isinstance(prepared, StepResult):
+            return {"handle": sid, "state": session.state, "error": prepared.to_dict()}
+        assert isinstance(code, str)
+        exhausted = self._begin_exec_step(session, code)
+        if exhausted is not None:
+            return {"handle": sid, "state": session.state, "error": exhausted.to_dict()}
+        try:
+            await session.driver.send({"op": "exec", "code": code})
+        except SandboxError as exc:
+            fatal = self._fatal(session, "SandboxDied", f"cannot start execution: {exc}")
+            return {"handle": sid, "state": session.state, "error": fatal.to_dict()}
+        session.state = "running"
+        session.ledger.resume()
+        started = time.monotonic()
+        session.job_started = started
+        session.active_job = asyncio.ensure_future(self._run_async_job(session, started))
+        return {"handle": sid, "state": "running"}
+
+    async def wait(self, handle: str, timeout: float = 30.0) -> dict[str, Any]:
+        """Collect one dispatched ``exec_async`` job (Phase 2).
+
+        A completed job returns the terminal step result -- the exact dict
+        ``exec``/``resume`` would have produced (``ok``/``needs_llm``/
+        ``final``/``error``/``timeout``/``exhausted``), and the job slot is
+        cleared. A job still running past ``timeout`` seconds returns
+        ``{"status": "pending", "elapsed": X}`` WITHOUT touching session
+        state (still ``running``) and WITHOUT cancelling: call ``wait``
+        again later. Unknown or already-collected handles raise
+        ``SessionError``. A job that parked on ``needs_llm`` is collected
+        normally; the existing sync ``resume`` continues from there.
+        """
+        session = self._sessions.get(handle)
+        if session is None:
+            raise SessionNotFoundError(f"unknown session: {handle}")
+        self._touch(session)
+        job = session.active_job
+        if job is None:
+            raise SessionError(
+                f"no pending async exec job for session {handle}: "
+                "dispatch with rlm_exec_async first, or the job was already collected"
+            )
+        if not job.done():
+            try:
+                result = await asyncio.wait_for(asyncio.shield(job), timeout)
+            except asyncio.TimeoutError:
+                elapsed = time.monotonic() - session.job_started
+                return {"status": "pending", "elapsed": elapsed}
+            session.active_job = None
+            return result.to_dict()
+        session.active_job = None
+        try:
+            result = job.result()
+        except asyncio.CancelledError:
+            elapsed = time.monotonic() - session.job_started
+            return {"status": "pending", "elapsed": elapsed}
+        return result.to_dict()
 
     async def resume(self, sid: str, results: Sequence[SubResult]) -> StepResult:
         session = self._require(sid)
@@ -1055,12 +1201,41 @@ class SessionManager:
             trajectory=self.writer.summary(session.root_id),
         )
 
+    async def _cancel_async_job(self, session: _Session) -> None:
+        """Cancel one outstanding ``exec_async`` job and kill its sandbox.
+
+        Used only by :meth:`close`: the task is cancelled (its ``finally``
+        closes the ledger window and marks the session ``dead``), then the
+        driver is closed (SIGKILL of the process group + reap), so no
+        orphan sandbox process survives. Best effort, never raises.
+        """
+        job = session.active_job
+        session.active_job = None
+        if job is not None and not job.done():
+            job.cancel()
+            with contextlib.suppress(asyncio.CancelledError, Exception):
+                await job
+        else:
+            # Already finished between dispatch and close: consume it so its
+            # ledger window (closed in the task finally) is accounted; a
+            # finished-but-uncollected job leaves no window open.
+            if job is not None:
+                with contextlib.suppress(asyncio.CancelledError, Exception):
+                    job.result()
+        with contextlib.suppress(Exception):
+            await session.driver.close()
+
     async def close(self, sid: str) -> list[str]:
         """Close ``sid`` and its whole subtree; returns the closed ids.
 
-        Refuses when *any* session of the subtree is mid-execution: killing
-        a running child with SIGKILL from a parent close would destroy its
-        step silently, so the whole collected subtree is checked first.
+        Phase 2 policy: a session with a dispatched-but-uncollected
+        ``exec_async`` job (``active_job`` set) is CANCELLED -- the
+        background task is cancelled and the sandbox process group is
+        killed (same ``kill process group`` mechanism as ``_timeout``) --
+        so no orphan process survives. A session ``running`` a *synchronous*
+        ``exec``/``resume`` step (no ``active_job``) still refuses with
+        ``SessionError`` for the whole subtree: killing it with SIGKILL
+        from a parent close would destroy its step silently.
         """
         self._require(sid)
         to_close: list[str] = []
@@ -1077,6 +1252,12 @@ class SessionManager:
                     and other.sid not in queue
                 ):
                     queue.append(other.sid)
+        # Cancel async jobs first: those sessions stop being "running"
+        # obstacles and their sandboxes are already dead afterwards.
+        for current in to_close:
+            session = self._sessions.get(current)
+            if session is not None and session.active_job is not None:
+                await self._cancel_async_job(session)
         running = [other for other in to_close if self._sessions[other].state == "running"]
         if running:
             raise SessionError(

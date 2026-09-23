@@ -34,7 +34,7 @@ def _walk(node: object) -> tuple[list[str], list[tuple[str, str]]]:
     return keys, strings
 
 
-async def test_list_tools_exposes_exactly_the_six_rlm_tools() -> None:
+async def test_list_tools_exposes_exactly_the_eight_rlm_tools() -> None:
     async with Harness() as harness:
         names = await harness.list_tools()
     assert len(names) == len(EXPECTED_TOOLS)

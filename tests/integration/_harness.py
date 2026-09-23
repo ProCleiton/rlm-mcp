@@ -32,7 +32,16 @@ from mcp import ClientSession
 from mcp.client.stdio import StdioServerParameters, stdio_client
 
 EXPECTED_TOOLS: frozenset[str] = frozenset(
-    {"rlm_open", "rlm_exec", "rlm_resume", "rlm_peek", "rlm_status", "rlm_close"}
+    {
+        "rlm_open",
+        "rlm_exec",
+        "rlm_exec_async",
+        "rlm_wait",
+        "rlm_resume",
+        "rlm_peek",
+        "rlm_status",
+        "rlm_close",
+    }
 )
 
 #: Chunk geometry used by the DOC-extraction sandbox code below.
