@@ -27,7 +27,6 @@ import json
 import operator
 import os
 import resource
-import signal
 import subprocess
 import sys
 import threading
@@ -144,8 +143,6 @@ class BackgroundHandle:
         self._lock = threading.Lock()
         self._buf: list[str] = []
         self._buf_len = 0
-        self._consumed = 0
-        self._closed = False
         assert proc.stdout is not None
         self._reader = threading.Thread(target=self._drain, daemon=True)
         self._reader.start()
@@ -196,7 +193,6 @@ class BackgroundHandle:
             text = "".join(self._buf)
             self._buf = []
             self._buf_len = 0
-            self._consumed += len(text)
             return text
 
     def kill(self) -> None:
