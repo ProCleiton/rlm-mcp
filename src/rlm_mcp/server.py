@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import dataclasses
 import os
+import re
 from collections.abc import Callable, Mapping
 from typing import Any, Literal, cast
 
@@ -30,7 +31,42 @@ from mcp.server.mcpserver import MCPServer
 from rlm_mcp import __version__
 from rlm_mcp.playbook import INSTRUCTIONS, PLAYBOOK
 from rlm_mcp.session import SessionError, SessionManager
-from rlm_mcp.types import Limits, OpenSpec, SubResult
+from rlm_mcp.types import Limits, Mode, OpenSpec, SubResult
+
+#: Validated ``trusted_env`` names: uppercase, digits/underscores, no secret
+#: values ever logged (only key names appear in error messages).
+_TRUSTED_ENV_KEY_RE = re.compile(r"^[A-Z][A-Z0-9_]*$")
+
+
+def _validate_trusted_env(
+    mode: str, trusted_env: Mapping[str, object] | None
+) -> dict[str, str] | None:
+    """Validate ``mode``/``trusted_env`` before building ``OpenSpec``.
+
+    ``mode`` must be ``"doc"`` or ``"exec"``; ``trusted_env`` is only
+    accepted with ``mode == "exec"``. Keys must match
+    ``^[A-Z][A-Z0-9_]*$`` and must not start with ``RLM_`` (reserved for
+    the driver's internal pipe-fd/rlimit params). Values must be strings.
+    Never logs values, only key names.
+    """
+    if mode not in ("doc", "exec"):
+        raise ValueError(f"invalid mode {mode!r}: expected 'doc' or 'exec'")
+    if trusted_env is None:
+        return None
+    if not isinstance(trusted_env, Mapping):
+        raise ValueError("trusted_env must be an object mapping names to values")
+    if mode != "exec":
+        raise ValueError("trusted_env requires mode='exec'")
+    validated: dict[str, str] = {}
+    for key, value in trusted_env.items():
+        if not isinstance(key, str) or not _TRUSTED_ENV_KEY_RE.match(key):
+            raise ValueError(f"invalid trusted_env key {key!r}: must match ^[A-Z][A-Z0-9_]*$")
+        if key.startswith("RLM_"):
+            raise ValueError(f"invalid trusted_env key {key!r}: 'RLM_' prefix is reserved")
+        if not isinstance(value, str):
+            raise ValueError(f"invalid trusted_env entry {key!r}: value must be a string")
+        validated[key] = value
+    return validated
 
 #: Log levels accepted by the SDK's MCPServer constructor.
 LogLevel = Literal["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"]
@@ -137,13 +173,18 @@ def _register_tools(server: MCPServer, manager: SessionManager, base_limits: Lim
         paths: list[str] | None = None,
         parent_session_id: str | None = None,
         limits: dict[str, Any] | None = None,
+        mode: Mode = "doc",
+        trusted_env: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         try:
+            validated_env = _validate_trusted_env(mode, trusted_env)
             spec = OpenSpec(
                 text=text,
                 paths=tuple(paths) if paths is not None else (),
                 parent_session_id=parent_session_id,
                 limits=_merge_limits(base_limits, limits),
+                mode=mode,
+                trusted_env=validated_env,
             )
             result = await manager.open(spec)
             return result.to_dict()
