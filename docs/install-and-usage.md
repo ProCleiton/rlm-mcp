@@ -189,11 +189,11 @@ tools:
 | --- | --- | --- |
 | `rlm_open` | `text?`, `paths?`, `parent_session_id?`, `limits?` | `{session_id, depth, context: <metadata>, budget}` |
 | `rlm_exec` | `session_id`, `code` | step result: `ok` / `needs_llm` / `final` / `error` / `exhausted` |
-| `rlm_exec_async` | `session_id`, `code` | `{handle, state}` immediately; collect with `rlm_wait` |
-| `rlm_wait` | `handle`, `timeout?` | terminal step result, or `{status: "pending", elapsed}` |
+| `rlm_exec_async` | `session_id`, `code` | unique `{handle, state}`; multiple jobs queue FIFO per session |
+| `rlm_wait` | `handle`, `timeout?` | terminal step result, or `{status: "pending", state, elapsed}` |
 | `rlm_resume` | `session_id`, `results: [{id, text, error?}]` | step result (see `rlm_exec`) |
 | `rlm_peek` | `session_id`, `expr`, `offset?`, `limit?` | truncated page `{text, offset, returned, total, truncated}` |
-| `rlm_status` | `session_id` | `{depth, spent, limits, state, trajectory}` |
+| `rlm_status` | `session_id` | `{depth, spent, limits, state, jobs: [{handle, state, elapsed}], trajectory}` |
 | `rlm_close` | `session_id` | `{closed: [...]}` |
 
 The cycle is driven by the harness agent:
