@@ -29,6 +29,8 @@ MAX_LIMIT_CHARS = 2000
 EXPECTED_TOOLS = {
     "rlm_open",
     "rlm_exec",
+    "rlm_exec_async",
+    "rlm_wait",
     "rlm_resume",
     "rlm_peek",
     "rlm_status",
@@ -52,7 +54,7 @@ async def _call(server: MCPServer, name: str, arguments: dict[str, object]) -> d
     return payload
 
 
-async def test_six_tools_registered_with_exact_names(server: MCPServer) -> None:
+async def test_eight_tools_registered_with_exact_names(server: MCPServer) -> None:
     tools = await server.list_tools()
     names = {tool.name for tool in tools}
     assert names == EXPECTED_TOOLS
@@ -63,7 +65,7 @@ async def test_instructions_and_tool_descriptions_stay_under_2000_chars(server: 
     assert len(INSTRUCTIONS) <= MAX_LIMIT_CHARS
     assert len(server.instructions) <= MAX_LIMIT_CHARS
     tools = await server.list_tools()
-    assert tools, "expected the six tools to be registered"
+    assert tools, "expected the eight tools to be registered"
     for tool in tools:
         assert len(tool.description) <= MAX_LIMIT_CHARS, (
             f"description of {tool.name!r} is {len(tool.description)} chars "

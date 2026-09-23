@@ -1,6 +1,6 @@
 # Modo `exec` opcional — plano de melhoria estrutural
 
-Status: proposal (draft, 2026-09-23). Branch: `feat/exec-mode-planning`
+Status: Fase 1 implementada; Fase 2 IMPLEMENTADA (branch `feat/exec-async-phase2`, 2026-09-23).
 (base: `feat/rlm-over-mcp-core`).
 Formato: segue a convenção do repo — `docs/DESIGN.md` com seções numeradas
 (citada nas docstrings do código, ex. `server.py` referencia "docs/DESIGN.md,
@@ -64,14 +64,42 @@ após a anterior estar validada em uso real.
    isso no modo `exec` (ex. `max_wall_seconds` alto para builds longos),
    sem mudança de código.
 
-## 4. Fase 2 — escopo médio, risco médio (só depois de validar a Fase 1 em uso real)
+## 4. Fase 2 — IMPLEMENTADA (branch `feat/exec-async-phase2`, 2026-09-23)
 
-4. `rlm_exec_async(session_id, code) -> {handle, state}` +
-   `rlm_wait(handle, timeout)` / `rlm_status` estendido — desacopla a chamada
-   MCP síncrona do tempo real de execução, resolvendo o teto de 120s/step
-   sem virar streaming completo. Novo método `SessionManager.exec_async`
-   (envia sem aguardar `_drive`, cria `asyncio.Task` guardada em
-   `session.jobs`).
+`rlm_exec_async(session_id, code) -> {handle, state}` + `rlm_wait(handle,
+timeout=30)` — desacopla a chamada MCP síncrona do tempo real de execução,
+resolvendo o teto de 120s/step sem virar streaming completo. Design final:
+
+- **Handle = `session_id`.** Só 1 job async por sessão é suportado (a sessão
+  fica `running` enquanto o job está pendente, e `exec`/`exec_async` exigem
+  `idle` — re-dispatch é recusado in-flow até `wait` coletar o job).
+- **Sem estado novo.** A sessão permanece `running` durante o job (decisão
+  menos invasiva: nenhum `dispatched` na state machine; todos os guards
+  existentes — `exec`/`resume`/`peek`/`close`/`sweep` — valem sem mudanças).
+- **Slot único.** `_Session.active_job: asyncio.Task | None` (+ `job_started`
+  para o `elapsed` do `pending`) em vez de `dict jobs` — suficiente dado o
+  limite de 1 job/sessão; `exec`/`exec_async` compartilham os guards via
+  `_prepare_exec` + `_begin_exec_step` (sem drift).
+- **`wait(handle, timeout)`:** job pronto → resultado terminal idêntico ao do
+  `exec` síncrono (`ok`/`needs_llm`/`final`/`error`/`exhausted`), slot limpo;
+  job ainda rodando → `{"status": "pending", "elapsed": X}` SEM tocar no
+  estado (ainda `running`) e SEM cancelar (re-`wait` depois); handle
+  desconhecido ou já coletado → `SessionError` claro. `needs_llm` via async
+  coleta normalmente e o `resume` síncrono existente continua dali (sem
+  `rlm_resume_async` — fora de escopo desta fase, como contratado).
+- **Orçamento:** a janela ativa do ledger (`resume()`/`pause()`) abre no
+  dispatch e fecha quando a Task de fundo completa — nunca no `wait` — de
+  modo que o wall clock conta só o tempo real de sandbox ativo, não os gaps
+  de poll do harness.
+- **Close:** `close()` numa sessão (ou ancestral/descendente) com job
+  pendente CANCELA a Task (`task.cancel()`) e fecha o driver (SIGKILL do
+  process group + reap — mesmo mecanismo de `_timeout`), sem órfãos; sessão
+  `running` em passo *síncrono* continua recusando `close` como antes.
+- **Tools:** `rlm_exec_async`/`rlm_wait` delegam a `manager.exec_async`/
+  `manager.wait` (sem lógica de budget duplicada no adapter); `rlm_wait`
+  valida `timeout` numérico `>= 0` como `invalid_arguments`.
+- **NÃO implementado (fora de escopo contratado):** streaming incremental de
+  output, `rlm_resume_async`.
 
 ## 5. Fase 3 — escopo médio, risco médio (avaliar necessidade real antes de iniciar)
 

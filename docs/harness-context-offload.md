@@ -26,8 +26,8 @@ programmatically. `rlm-mcp` implements that as a plain MCP tool set.
 
 No harness change is required for this part:
 
-- Mount `rlm-mcp` as an MCP server (stdio). The model gets six tools
-  (`rlm_open`/`rlm_exec`/`rlm_resume`/`rlm_peek`/`rlm_status`/`rlm_close`).
+- Mount `rlm-mcp` as an MCP server (stdio). The model gets eight tools
+  (`rlm_open`/`rlm_exec`/`rlm_exec_async`/`rlm_wait`/`rlm_resume`/`rlm_peek`/`rlm_status`/`rlm_close`).
 - Instruct the agent to offload real context **early** — the moment a task has
   real input (files, docs, codebase, corpus), load it into `rlm_open` and work it
   with `rlm_exec`/`llm_query` over chunks instead of reading it into the window.
@@ -61,7 +61,7 @@ Reference implementation sketch:
    - the `session_id` handle;
    - a one-line instruction: "your context is in RLM session `<id>`; query it
      with `rlm_exec`/`llm_query` rather than asking for the raw text."
-3. The agent then uses the six RLM tools to inspect/process the context on
+3. The agent then uses the eight RLM tools to inspect/process the context on
    demand. Subagents inherit the same handle (or open child sessions with
    `parent_session_id`).
 

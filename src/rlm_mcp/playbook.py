@@ -95,7 +95,7 @@ payload, not as an exception you must recover from.
 
 INSTRUCTIONS: str = (
     "rlm-mcp brings the Recursive Language Model (RLM) paradigm to any "
-    "agent as six tools. A long document is loaded into a persistent "
+    "agent as eight tools. A long document is loaded into a persistent "
     "sandbox REPL as the variable `context`; you see only metadata and "
     "work on it by running Python code with rlm_exec. Loop over chunks "
     "and call llm_query / llm_query_batched inside the code: execution "

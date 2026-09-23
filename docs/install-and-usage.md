@@ -182,13 +182,15 @@ Any MCP client that launches stdio servers accepts this shape:
 rlm-mcp implements the RLM (Recursive Language Model) paradigm. A long
 document is loaded into a sandbox REPL as the variable `context`; the
 harness's agent — the *root LM* — works on it by running Python code, never
-by having the raw text pasted into the conversation. The server exposes six
+by having the raw text pasted into the conversation. The server exposes eight
 tools:
 
 | Tool | Input | Output |
 | --- | --- | --- |
 | `rlm_open` | `text?`, `paths?`, `parent_session_id?`, `limits?` | `{session_id, depth, context: <metadata>, budget}` |
 | `rlm_exec` | `session_id`, `code` | step result: `ok` / `needs_llm` / `final` / `error` / `exhausted` |
+| `rlm_exec_async` | `session_id`, `code` | `{handle, state}` immediately; collect with `rlm_wait` |
+| `rlm_wait` | `handle`, `timeout?` | terminal step result, or `{status: "pending", elapsed}` |
 | `rlm_resume` | `session_id`, `results: [{id, text, error?}]` | step result (see `rlm_exec`) |
 | `rlm_peek` | `session_id`, `expr`, `offset?`, `limit?` | truncated page `{text, offset, returned, total, truncated}` |
 | `rlm_status` | `session_id` | `{depth, spent, limits, state, trajectory}` |
