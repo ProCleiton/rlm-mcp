@@ -32,6 +32,7 @@ import sys
 import threading
 import traceback
 from collections.abc import Callable, Iterable
+from typing import Any
 
 # Canonical protocol fds (the driver may pass them at other numbers).
 _IN_FD = 3
@@ -221,7 +222,7 @@ def _cleanup_background_processes() -> None:
 
 def spawn_background(
     cmd: list[str],
-    **popen_kwargs: object,
+    **popen_kwargs: Any,
 ) -> BackgroundHandle:
     """Spawn ``cmd`` as a detached background child; return its handle.
 
@@ -232,20 +233,24 @@ def spawn_background(
     sandbox process group so the supervisor's killpg on close/timeout
     reaps the whole tree (zero-orphan guarantee preserved from driver.py).
     """
-    if not isinstance(cmd, (list, tuple)) or not cmd or not all(
-        isinstance(part, str) for part in cmd
+    if (
+        not isinstance(cmd, (list, tuple))
+        or not cmd
+        or not all(isinstance(part, str) for part in cmd)
     ):
         raise ValueError("spawn_background(cmd) requires a non-empty list[str]")
     if popen_kwargs.get("start_new_session"):
-        raise ValueError("start_new_session=True is refused: children must stay in the sandbox process group")
+        raise ValueError(
+            "start_new_session=True is refused: children must stay in the sandbox process group"
+        )
     if popen_kwargs.get("stdout") is not None or popen_kwargs.get("stderr") is not None:
         raise ValueError("stdout/stderr capture is managed by the handle; pass no stdout/stderr")
-    kwargs: dict[str, object] = dict(popen_kwargs)
+    kwargs: dict[str, Any] = dict(popen_kwargs)
     kwargs["stdout"] = subprocess.PIPE
     kwargs["stderr"] = subprocess.STDOUT
     kwargs["text"] = True
     kwargs.setdefault("bufsize", 1)
-    proc = subprocess.Popen(cmd, **kwargs)  # type: ignore[arg-type]
+    proc = subprocess.Popen(cmd, **kwargs)
     return BackgroundHandle(proc)
 
 

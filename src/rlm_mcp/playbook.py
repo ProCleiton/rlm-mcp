@@ -110,10 +110,10 @@ INSTRUCTIONS: str = (
     "sandbox REPL as the variable `context`; you see only metadata and "
     "work on it by running Python code with rlm_exec. Loop over chunks "
     "and call llm_query / llm_query_batched inside the code: execution "
-    "suspends and rlm_exec returns status=\"needs_llm\" with requests. "
+    'suspends and rlm_exec returns status="needs_llm" with requests. '
     "Answer each request with your own model (fan out to subagents in "
     "parallel for several ids) and feed the texts back with rlm_resume; "
-    "kind=\"rlm\" means delegate to a subagent that opens a child session "
+    'kind="rlm" means delegate to a subagent that opens a child session '
     "via rlm_open(parent_session_id=...). Finish with FINAL / FINAL_VAR. "
     "For long runs use rlm_exec_async + rlm_wait (FIFO queue, poll again "
     "on pending). "
