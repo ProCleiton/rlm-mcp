@@ -34,7 +34,7 @@ from dataclasses import dataclass, field
 
 from rlm_mcp.budget import BudgetLedger
 from rlm_mcp.context import load_context
-from rlm_mcp.sandbox import AGENT_SCRIPT, LocalDriver, SandboxError, SandboxTimeout
+from rlm_mcp.sandbox import AGENT_SCRIPT, KEEP_ENV, LocalDriver, SandboxError, SandboxTimeout
 from rlm_mcp.trajectory import TrajectoryWriter, cut_text
 from rlm_mcp.types import (
     RESERVED_NAMES,
@@ -172,7 +172,7 @@ def _fit_request_prompt(prompt: str, budget: int, pointer: str | None) -> str:
         if budget >= len(marker):
             avail = budget - len(marker)
             head_n = avail // 2
-            return prompt[:head_n] + marker + prompt[-(avail - head_n):]
+            return prompt[:head_n] + marker + prompt[-(avail - head_n) :]
     return plain
 
 
@@ -594,9 +594,7 @@ class SessionManager:
             ],
         )
         session.state = "parked"
-        return StepResult(
-            status="needs_llm", requests=requests, spent=session.ledger.snapshot()
-        )
+        return StepResult(status="needs_llm", requests=requests, spent=session.ledger.snapshot())
 
     def _on_exec_done(self, session: _Session, frame: dict[str, object]) -> StepResult:
         stdout_raw = frame.get("stdout") or ""
@@ -687,7 +685,20 @@ class SessionManager:
 
         In ``"doc"`` mode (default) ``trusted_env`` is ignored even when
         provided (defense in depth: the scrubbed environment is preserved).
+        In ``"exec"`` mode, ``trusted_env`` keys with the ``RLM_`` prefix or
+        matching a reserved sandbox variable (``KEEP_ENV``) are refused with
+        ``SessionError`` before any sandbox process is spawned — the same
+        rejection ``server._validate_trusted_env`` applies at the ``rlm_open``
+        boundary, replicated here so direct ``SessionManager``/``OpenSpec``
+        callers cannot bypass it. The driver's silent drop of such keys stays
+        as a final defense layer.
         """
+        if spec.mode == "exec" and spec.trusted_env:
+            for key in spec.trusted_env:
+                if isinstance(key, str) and (key.startswith("RLM_") or key in KEEP_ENV):
+                    raise SessionError(
+                        f"invalid trusted_env key {key!r}: overrides a reserved sandbox variable"
+                    )
         parent: _Session | None = None
         if spec.parent_session_id is not None:
             parent = self._require(spec.parent_session_id)
@@ -726,7 +737,7 @@ class SessionManager:
         # boot crash stays visible.
         timeout = _ready_timeout()
         extra_env = spec.trusted_env if spec.mode == "exec" else None
-        driver = LocalDriver(self._agent_script, limits, extra_env=extra_env)
+        driver = LocalDriver(self._agent_script, limits, extra_env=extra_env, mode=spec.mode)
         spawn_failure: Exception | None = None
         for _attempt in range(2):
             try:
@@ -734,7 +745,9 @@ class SessionManager:
             except (SandboxError, OSError) as exc:
                 spawn_failure = exc
                 await driver.close()
-                driver = LocalDriver(self._agent_script, limits, extra_env=extra_env)
+                driver = LocalDriver(
+                    self._agent_script, limits, extra_env=extra_env, mode=spec.mode
+                )
                 continue
             spawn_failure = None
             break
@@ -938,8 +951,7 @@ class SessionManager:
         session.ledger.resume()
         started = time.monotonic()
         payload = [
-            {"id": result.id, "text": result.text, "error": result.error}
-            for result in normalized
+            {"id": result.id, "text": result.text, "error": result.error} for result in normalized
         ]
         try:
             try:
