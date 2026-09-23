@@ -173,6 +173,8 @@ def _merge_limits(base: Limits, overrides: Mapping[str, object] | None) -> Limit
         max_output_chars=cast(int, updates.get("max_output_chars", base.max_output_chars)),
         max_errors=cast(int, updates.get("max_errors", base.max_errors)),
     )
+
+
 def _register_tools(server: MCPServer, manager: SessionManager, base_limits: Limits) -> None:
     """Register the eight RLM tools, each delegating to ``manager``."""
 
@@ -231,11 +233,11 @@ def _register_tools(server: MCPServer, manager: SessionManager, base_limits: Lim
     @server.tool(
         name="rlm_exec_async",
         description=(
-            "Dispatch Python `code` in the session's REPL without awaiting "
-            "completion. Returns `{handle, state}` immediately; collect the "
-            "terminal step result (ok/needs_llm/final/error/exhausted) with "
-            "`rlm_wait(handle)`. Guards match `rlm_exec` (idle state, syntax, "
-            "reserved names, budget); collect-before-reexec applies."
+            "Queue Python `code` in the session's persistent REPL. Returns a "
+            "unique `{handle, state}` immediately; multiple jobs per session "
+            "run FIFO because the sandbox is single-flight. Collect any job "
+            "independently with `rlm_wait(handle)`. Syntax, reserved-name, "
+            "session-state, and budget guards still apply."
         ),
     )
     async def rlm_exec_async(session_id: str, code: str) -> dict[str, Any]:
@@ -247,11 +249,11 @@ def _register_tools(server: MCPServer, manager: SessionManager, base_limits: Lim
     @server.tool(
         name="rlm_wait",
         description=(
-            "Collect one dispatched `rlm_exec_async` job. A finished job "
-            "returns the terminal step result; a still-running job past "
-            "`timeout` seconds returns `{status: 'pending', elapsed}` "
-            "without cancelling -- call again later. Unknown or already "
-            "collected handles come back as error payloads."
+            "Collect one dispatched `rlm_exec_async` handle. A completed job "
+            "returns its terminal step result; a queued/running job past "
+            "`timeout` returns `{status: 'pending', state, elapsed}` without "
+            "cancelling. Collection order is independent of FIFO execution. "
+            "Unknown or already collected handles return error payloads."
         ),
     )
     async def rlm_wait(handle: str, timeout: float = 30.0) -> dict[str, Any]:
@@ -325,9 +327,9 @@ def _register_tools(server: MCPServer, manager: SessionManager, base_limits: Lim
     @server.tool(
         name="rlm_status",
         description=(
-            "Report the session state: depth, budget spent vs limits, state and "
-            "trajectory pointer. Check this before planning more work; budget "
-            "exhaustion is a hard stop."
+            "Report depth, budget, session state, outstanding job handles/states, "
+            "and trajectory pointer. Check this before planning more work; "
+            "budget exhaustion is a hard stop."
         ),
     )
     async def rlm_status(session_id: str) -> dict[str, Any]:

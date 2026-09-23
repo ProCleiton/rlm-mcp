@@ -1,7 +1,7 @@
 # Modo `exec` opcional — plano de melhoria estrutural
 
-Status: Fase 1 implementada; Fase 2 IMPLEMENTADA (branch `feat/exec-async-phase2`, 2026-09-23).
-(base: `feat/rlm-over-mcp-core`).
+Status: Fases 1, 2 e 3 IMPLEMENTADAS (Fase 3: branch
+`feat/exec-multi-job-phase3`, 2026-09-23; base `main` em `7d11450`).
 Formato: segue a convenção do repo — `docs/DESIGN.md` com seções numeradas
 (citada nas docstrings do código, ex. `server.py` referencia "docs/DESIGN.md,
 section 5"). O repo não usa OpenSpec (sem diretório `openspec/`), então este
@@ -101,12 +101,41 @@ resolvendo o teto de 120s/step sem virar streaming completo. Design final:
 - **NÃO implementado (fora de escopo contratado):** streaming incremental de
   output, `rlm_resume_async`.
 
-## 5. Fase 3 — escopo médio, risco médio (avaliar necessidade real antes de iniciar)
+## 5. Fase 3 — IMPLEMENTADA (branch `feat/exec-multi-job-phase3`, 2026-09-23)
 
-5. Estado `detached-running`/`busy` + tabela de jobs persistentes por sessão,
-   para suportar processo tipo watcher/servidor/shell interativo entre
-   chamadas — só se houver caso de uso real que justifique (ex. `hub`-like
-   dentro do RLM).
+A camada MCP agora administra múltiplos jobs simultaneamente pendentes de
+coleta por sessão, sem alterar o protocolo single-flight do sandbox:
+
+- **Handles únicos:** cada `rlm_exec_async` aceito recebe um `job_<token>`
+  globalmente único. O handle deixa de ser o `session_id`, permitindo vários
+  resultados não coletados na mesma sessão.
+- **Job table + FIFO:** `_Session.jobs: dict[str, _Job]` retém jobs até o
+  `rlm_wait` correspondente; `job_queue` e um único `job_runner` executam os
+  frames em ordem de dispatch. O runner inicia B automaticamente quando A
+  termina normalmente, mesmo que A ainda não tenha sido coletado. Assim,
+  `rlm_wait(B)` pode aguardar e coletar B antes de `rlm_wait(A)`.
+- **Estados por job:** `queued`, `running` e `completed`. `rlm_status` expõe
+  `jobs=[{handle,state,elapsed}]` para todos os resultados ainda não coletados.
+  Um poll vencido retorna `{status:"pending",state,elapsed}`; para `queued`,
+  `elapsed=0`, pois espera em fila não é execução.
+- **Sandbox continua serial:** `sandbox/agent.py` não mudou. Nunca há dois
+  `exec` concorrentes no mesmo processo Python; esta fase multiplica handles
+  e resultados MCP-side, não cria subprocessos detached nem streaming.
+- **Park/resume:** se A produzir `needs_llm`, o FIFO pausa antes de B. Após o
+  `rlm_resume` síncrono deixar a sessão `idle`, o runner acorda e executa B.
+  Se a sessão virar `final`/`dead`, jobs que ainda não começaram são
+  concluídos com erro `InvalidState`, individualmente coletável.
+- **Budget:** iteração e janela ativa só começam quando o runner realmente
+  despacha o job no sandbox. Tempo de fila e tempo entre polls não contam no
+  wall clock. Cada job executado preserva os mesmos débitos da Fase 2.
+- **Close:** `close()` cancela o runner e TODOS os jobs queued/running/done
+  não coletados da sessão e da árvore, limpa os handles e fecha/recolhe o
+  grupo de processo. Passos síncronos em execução continuam protegidos pela
+  recusa de close.
+- **Compatibilidade:** o uso comum de um único job continua retornando
+  `state="running"`, aceita polls repetidos e entrega o mesmo `StepResult` da
+  Fase 2; a única mudança necessária é usar o novo handle retornado, em vez
+  de assumir `handle == session_id`.
 
 ## 6. Tabela de escopo/risco
 
@@ -116,13 +145,13 @@ resolvendo o teto de 120s/step sem virar streaming completo. Design final:
 | 2 | `trusted_env` reinjeção controlada de env whitelisted | Pequeno | Baixo (opt-in) |
 | 3 | Uso de `limits` já existente para tetos elevados por sessão-canal | Trivial (já existe) | Baixo |
 | 4 | `rlm_exec_async` + `rlm_wait`/poll | Médio (grande com streaming) | Médio |
-| 5 | Estado `detached-running` + jobs persistentes | Médio | Médio (mexe na state machine) |
+| 5 | Job table + FIFO multi-job MCP-side | Médio | Médio (runner serial preserva sandbox) |
 | — | Shell real (`/bin/bash`) no sandbox | Grande | Alto — NÃO recomendado |
 
 ## 7. Explicitamente FORA de escopo / não recomendado
 
 Substituir o sandbox Python por shell real (`/bin/bash`) — escopo grande,
 risco alto (perde protocolo JSON-lines, rlimits, `_Capture`, trajectory).
-Considerado desnecessário: a Fase 1+2 já cobre o caso de uso principal
-(execução de comandos/tools com timeout maior e credenciais controladas)
-sem reescrever o núcleo do projeto.
+Considerado desnecessário: as Fases 1+2+3 cobrem execução assíncrona com
+múltiplos handles e credenciais controladas sem reescrever o núcleo. Processos
+detached, streaming e um protocolo de shell interativo permanecem fora de escopo.

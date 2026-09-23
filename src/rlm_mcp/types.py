@@ -258,6 +258,7 @@ class StatusResult:
     limits: Limits
     state: SessionState
     trajectory: dict[str, object]
+    jobs: list[dict[str, object]] = field(default_factory=list)
 
     def to_dict(self) -> dict[str, object]:
         return {
@@ -266,4 +267,5 @@ class StatusResult:
             "limits": self.limits.to_dict(),
             "state": self.state,
             "trajectory": self.trajectory,
+            "jobs": self.jobs,
         }
