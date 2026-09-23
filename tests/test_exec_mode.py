@@ -141,3 +141,68 @@ async def test_server_rejects_invalid_mode(server: MCPServer) -> None:
     # rejection naming the offending value), not an error payload.
     with pytest.raises(ToolError, match="bogus"):
         await _call(server, "rlm_open", {"text": "x", "mode": "bogus"})
+
+def test_validate_trusted_env_strict_key_shape() -> None:
+    # valid: 2..64 chars, uppercase start
+    assert _validate_trusted_env("exec", {"AB": "1"}) == {"AB": "1"}
+    assert _validate_trusted_env("exec", {"A" * 64: "1"}) == {"A" * 64: "1"}
+    for bad in ["", "A", "aB", "ABc", "A-B", "A B", "*", "A" * 65, "1AB", "_AB"]:
+        with pytest.raises(ValueError):
+            _validate_trusted_env("exec", {bad: "1"})
+    # value leak check on shape rejection
+    try:
+        _validate_trusted_env("exec", {"bad-key": SECRET})
+    except ValueError as exc:
+        assert SECRET not in str(exc)
+    else:
+        raise AssertionError("bad key was accepted")
+
+
+def test_build_sandbox_env_drops_keep_env_and_rlm() -> None:
+    import os
+    baseline = dict(os.environ)
+    try:
+        os.environ["PATH"] = "/orig-path"
+        os.environ["HOME"] = "/orig-home"
+        env = _build_sandbox_env(
+            Limits(),
+            5,
+            6,
+            {
+                "PATH": "/evil",
+                "HOME": "/evil",
+                "LANG": "evil",
+                "TZ": "evil",
+                "TMPDIR": "/evil",
+                "RLM_EVIL": "1",
+                "GOOD_VAR": "ok",
+            },
+        )
+        assert env["PATH"] == "/orig-path"
+        assert env["HOME"] == "/orig-home"
+        assert env.get("RLM_EVIL") != "1"
+        assert env["GOOD_VAR"] == "ok"
+    finally:
+        os.environ.clear()
+        os.environ.update(baseline)
+
+
+async def test_open_trajectory_records_mode_and_keys(mgr: SessionManager) -> None:
+    import json
+    result = await mgr.open(
+        OpenSpec(text="hi", mode="exec", trusted_env={"ZZ_VAR": "v", "AA_VAR": "w"})
+    )
+    assert result.status == "ok"
+    sid = result.session_id
+    assert sid is not None
+    try:
+        raw = mgr.writer.read(sid)
+        lines = [json.loads(line) for line in raw.splitlines()]
+        opens = [e for e in lines if e["type"] == "open"]
+        assert opens, "expected an open event in trajectory"
+        evt = opens[0]
+        assert evt["mode"] == "exec"
+        assert evt["trusted_env_keys"] == ["AA_VAR", "ZZ_VAR"]
+        assert json.dumps(evt["trusted_env_keys"]) == '["AA_VAR", "ZZ_VAR"]'
+    finally:
+        await mgr.close(sid)

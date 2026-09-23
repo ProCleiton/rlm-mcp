@@ -785,6 +785,8 @@ class SessionManager:
             driver=driver,
         )
         self._sessions[sid] = session
+        trusted_keys = sorted(spec.trusted_env.keys()) if spec.trusted_env else []
+        logger.info("opened session %s mode=%s trusted_env_keys=%s", sid, spec.mode, trusted_keys)
         self._log(
             session,
             "open",
@@ -792,6 +794,8 @@ class SessionManager:
             context_chars=meta.chars,
             context_lines=meta.lines,
             parts=len(meta.parts),
+            mode=spec.mode,
+            trusted_env_keys=trusted_keys,
         )
         return StepResult(
             status="ok",
