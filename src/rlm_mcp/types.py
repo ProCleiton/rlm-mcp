@@ -16,6 +16,7 @@ from typing import Literal
 Kind = Literal["llm", "rlm"]
 Status = Literal["ok", "needs_llm", "final", "error", "exhausted"]
 SessionState = Literal["idle", "running", "parked", "final", "dead", "closed"]
+Mode = Literal["doc", "exec"]
 
 #: Names injected into the sandbox namespace (DESIGN section 6). Rebinding
 #: any of them is refused at ``rlm_exec`` time.
@@ -62,13 +63,22 @@ class Limits:
 
 @dataclass(frozen=True)
 class OpenSpec:
-    """Everything ``SessionManager.open`` needs to start a session."""
+    """Everything ``SessionManager.open`` needs to start a session.
+
+    ``mode`` selects the session channel: ``"doc"`` (default) is the
+    document-processing sandbox with a fully scrubbed environment, while
+    ``"exec"`` opts into controlled reinjection of ``trusted_env`` entries.
+    ``trusted_env`` is ignored unless ``mode == "exec"`` (defense in depth;
+    see ``SessionManager.open``).
+    """
 
     text: str | None = None
     paths: tuple[str, ...] = ()
     parent_session_id: str | None = None
     limits: Limits = field(default_factory=Limits)
     label: str | None = None
+    mode: Mode = "doc"
+    trusted_env: dict[str, str] | None = None
 
 
 @dataclass(frozen=True)

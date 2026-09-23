@@ -683,6 +683,11 @@ class SessionManager:
     # -- public API (DESIGN section 8) ----------------------------------------
 
     async def open(self, spec: OpenSpec) -> StepResult:
+        """Start a session; ``trusted_env`` applies only when ``mode="exec"``.
+
+        In ``"doc"`` mode (default) ``trusted_env`` is ignored even when
+        provided (defense in depth: the scrubbed environment is preserved).
+        """
         parent: _Session | None = None
         if spec.parent_session_id is not None:
             parent = self._require(spec.parent_session_id)
@@ -720,7 +725,8 @@ class SessionManager:
         # ready is reported with its exit code and captured stderr so a real
         # boot crash stays visible.
         timeout = _ready_timeout()
-        driver = LocalDriver(self._agent_script, limits)
+        extra_env = spec.trusted_env if spec.mode == "exec" else None
+        driver = LocalDriver(self._agent_script, limits, extra_env=extra_env)
         spawn_failure: Exception | None = None
         for _attempt in range(2):
             try:
@@ -728,7 +734,7 @@ class SessionManager:
             except (SandboxError, OSError) as exc:
                 spawn_failure = exc
                 await driver.close()
-                driver = LocalDriver(self._agent_script, limits)
+                driver = LocalDriver(self._agent_script, limits, extra_env=extra_env)
                 continue
             spawn_failure = None
             break

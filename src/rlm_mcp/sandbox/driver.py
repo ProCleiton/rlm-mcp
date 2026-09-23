@@ -73,7 +73,16 @@ def _env_int(name: str, default: int) -> int:
         return default
 
 
-def _build_sandbox_env(limits: Limits, in_fd: int, out_fd: int) -> dict[str, str]:
+def _build_sandbox_env(
+    limits: Limits, in_fd: int, out_fd: int, extra_env: Mapping[str, str] | None = None
+) -> dict[str, str]:
+    """Build the scrubbed sandbox environment plus internal ``RLM_*`` params.
+
+    ``extra_env`` (opt-in, exec mode only) is applied AFTER the scrub and the
+    internal ``RLM_*`` entries. Entries whose key starts with ``RLM_`` are
+    ignored so callers can never override the pipe fds, output cap, or
+    rlimits the driver injects.
+    """
     env = scrub_env()
     env.update(
         {
@@ -90,6 +99,11 @@ def _build_sandbox_env(limits: Limits, in_fd: int, out_fd: int) -> dict[str, str
             "RLM_RLIMIT_NPROC": str(_env_int("RLM_RLIMIT_NPROC", DEFAULT_RLIMIT_NPROC)),
         }
     )
+    if extra_env:
+        for key, value in extra_env.items():
+            if key.startswith("RLM_"):
+                continue
+            env[key] = value
     return env
 
 
@@ -103,11 +117,23 @@ def _write_all(fd: int, payload: bytes) -> None:
 
 
 class LocalDriver:
-    """Supervises one sandbox agent process speaking JSON lines over pipes."""
+    """Supervises one sandbox agent process speaking JSON lines over pipes.
 
-    def __init__(self, agent_script: str | os.PathLike[str], limits: Limits):
+    ``extra_env`` carries opt-in reinjected variables (exec mode only,
+    already validated upstream). It is applied after the scrub and the
+    internal ``RLM_*`` params; ``RLM_*``-prefixed keys are ignored, never
+    overlaid.
+    """
+
+    def __init__(
+        self,
+        agent_script: str | os.PathLike[str],
+        limits: Limits,
+        extra_env: Mapping[str, str] | None = None,
+    ):
         self._agent_script = os.path.abspath(os.fspath(agent_script))
         self._limits = limits
+        self._extra_env = dict(extra_env) if extra_env else None
         self._proc: asyncio.subprocess.Process | None = None
         self._reader: asyncio.StreamReader | None = None
         self._read_transport: asyncio.BaseTransport | None = None
@@ -176,7 +202,7 @@ class LocalDriver:
         in_r, in_w = os.pipe()  # supervisor -> agent
         out_r, out_w = os.pipe()  # agent -> supervisor
         err_r, err_w = os.pipe()  # agent stderr -> supervisor (diagnostics)
-        env = _build_sandbox_env(self._limits, in_r, out_w)
+        env = _build_sandbox_env(self._limits, in_r, out_w, self._extra_env)
         try:
             self._proc = await asyncio.create_subprocess_exec(
                 sys.executable,
