@@ -54,7 +54,10 @@ Reference implementation sketch:
 1. On session start, the harness collects the preamble sources (its system
    prompt, workspace `AGENTS.md`/`RULES.md`/`SYSTEM.md`, skill bodies, MCP tool
    descriptions, project files) and calls `rlm_open(paths=[...])` (or
-   `rlm_open(text=...)`), producing a `session_id`.
+   `rlm_open(text=...)`), producing a `session_id`. (`rlm_open` also accepts
+   `mode` (`"doc"` default, `"exec"` opt-in) and `trusted_env` (only with
+   `mode="exec"`) for builds/long shell runs — see
+   `docs/install-and-usage.md` §3; preamble offload itself stays `mode="doc"`.)
 2. It injects into the model window, instead of the full text, a compact block:
    - per source: name + char/line count + a short head/tail preview (the
      `context` metadata `rlm_open` already returns — never the raw text);

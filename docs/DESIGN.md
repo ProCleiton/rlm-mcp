@@ -1,6 +1,6 @@
 # RLM over MCP — design and protocol
 
-Status: v0 (draft, implemented by `feat/rlm-over-mcp-core`)
+Status: v0 (draft, implemented by `feat/rlm-over-mcp-core`) + exec extension, Fases 1+2+3 (see `docs/proposals/exec-mode.md` and §5.1 below).
 
 ## 1. What this is
 
@@ -119,6 +119,39 @@ inside loops; never paste large slices into your own reasoning; finish with
 
 `rlm://trajectory/{root_id}` — JSONL of the whole tree.
 
+### 5.1 Exec extension (Fases 1+2+3 — implemented, opt-in)
+
+The §5 surface above is unchanged for the default `mode="doc"`. The exec
+extension adds, opt-in per session via `rlm_open(..., mode="exec",
+trusted_env={...})`:
+
+- **Mode + `trusted_env` (Fase 1).** `mode` defaults to `"doc"` (behavior
+  100% preserved). `trusted_env` is only accepted with `mode="exec"`; key
+  names must match `^[A-Z][A-Z0-9_]{1,63}$`, must not use the `RLM_` prefix
+  and must not override a reserved sandbox variable (`KEEP_ENV`: `PATH`,
+  `HOME`, `LANG`, `TZ`, `TMPDIR`). Validation happens before any session is
+  created (MCP adapter + `SessionManager.open` for direct calls; the
+  driver's silent drop stays as defense in depth). Only key names are ever
+  logged, never values. Exec sessions raise the `RLIMIT_NPROC` default to
+  2048 (`doc` stays at 256); an explicit `RLM_RLIMIT_NPROC` operator env var
+  always wins, and heavily loaded hosts may still need to raise it manually.
+  Raised per-session ceilings keep working through the existing
+  `rlm_open(limits={...})` overrides (e.g. `max_exec_seconds`/`max_wall_seconds`
+  for long builds).
+- **Async exec + wait (Fases 2+3).** `rlm_exec_async(session_id, code)`
+  returns a unique `{handle, state}` immediately; `rlm_wait(handle,
+  timeout=30)` collects one job: a finished job returns its terminal
+  `StepResult` (`ok`/`needs_llm`/`final`/`error`/`exhausted` — `needs_llm`
+  still resumes via the synchronous `rlm_resume`); a queued/running job past
+  `timeout` returns `{status: "pending", state, elapsed}` without cancelling
+  (poll again later). Several jobs per session queue FIFO behind a single
+  runner because the sandbox protocol stays single-flight — never two
+  concurrent `exec` frames in one Python process. Collection order is
+  independent of FIFO execution order, `rlm_status` exposes pending jobs as
+  `jobs: [{handle, state, elapsed}]`, and closing a session cancels its
+  queued/running/uncollected jobs (synchronous steps still refuse `close`).
+  No streaming, no `rlm_resume_async`, no detached subprocesses.
+
 ## 6. Sandbox namespace
 
 Injected, reserved names: `context`, `context_parts`, `history`, `llm_query`,
@@ -163,6 +196,8 @@ class OpenSpec:
     parent_session_id: str | None = None
     limits: Limits = Limits()
     label: str | None = None
+    mode: Literal["doc", "exec"] = "doc"          # Fase 1: opt-in exec
+    trusted_env: dict[str, str] | None = None     # Fase 1: only with mode="exec"
 
 @dataclass(frozen=True)
 class SubRequest:  id: str; kind: Kind; prompt: str; context: str | None
@@ -175,10 +210,12 @@ class StepResult:  status: Status; ... (fields per §5)
 class SessionManager:
     async def open(self, spec: OpenSpec) -> StepResult          # status="ok"
     async def exec(self, sid: str, code: str) -> StepResult
+    async def exec_async(self, sid: str, code: str) -> dict     # Fase 2+3: {handle, state}, FIFO multi-job
+    async def wait(self, handle: str, timeout: float) -> dict   # Fase 2+3: terminal result or {status: "pending", state, elapsed}
     async def resume(self, sid: str, results: Sequence[SubResult]) -> StepResult
     async def peek(self, sid: str, expr: str, offset: int, limit: int) -> PeekResult
-    def status(self, sid: str) -> StatusResult
-    async def close(self, sid: str) -> list[str]                # closes subtree
+    def status(self, sid: str) -> StatusResult                  # includes jobs: [{handle, state, elapsed}]
+    async def close(self, sid: str) -> list[str]                # closes subtree; cancels pending async jobs
     async def sweep(self) -> None                               # TTL eviction
 ```
 
@@ -188,5 +225,8 @@ no state handling of its own.
 
 ## 9. Out of scope for v0
 
-Docker driver, streamable HTTP transport, prefix caching, async sub-call
-pipelining, trajectory visualizer, non-Python REPLs.
+Docker driver, streamable HTTP transport, prefix caching, trajectory
+visualizer, non-Python REPLs. Streaming incremental output,
+`rlm_resume_async` and detached subprocesses are explicitly out of scope
+(see `docs/proposals/exec-mode.md` §7); async needs are covered by the
+`rlm_exec_async`/`rlm_wait` FIFO queue instead.
