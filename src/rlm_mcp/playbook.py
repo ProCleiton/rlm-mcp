@@ -60,6 +60,12 @@ Rules
    FINAL_VAR("name") ends it with the current value of a namespace
    variable. Never stop working on a session without running one of them.
    Close finished child sessions with rlm_close so their budgets release.
+7. Exec mode (opt-in): the sandbox env is scrubbed by default. For builds
+   or long shell runs, open with mode="exec" and pass only the needed
+   vars via trusted_env (names: ^[A-Z][A-Z0-9_]{1,63}$), plus raised
+   limits, e.g. rlm_open(paths=[...], mode="exec",
+   trusted_env={"CI": "1"}, limits={"max_exec_seconds": 600,
+   "max_wall_seconds": 900}). Only key names are ever logged, never values.
 
 Idiomatic pattern (summarize a long context, chunk by chunk):
 

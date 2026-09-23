@@ -79,9 +79,10 @@ def _build_sandbox_env(
     """Build the scrubbed sandbox environment plus internal ``RLM_*`` params.
 
     ``extra_env`` (opt-in, exec mode only) is applied AFTER the scrub and the
-    internal ``RLM_*`` entries. Entries whose key starts with ``RLM_`` are
-    ignored so callers can never override the pipe fds, output cap, or
-    rlimits the driver injects.
+    internal ``RLM_*`` entries. Entries whose key starts with ``RLM_`` or
+    that matches a ``KEEP_ENV`` name (``PATH``, ``HOME``, ``LANG``, ``TZ``,
+    ``TMPDIR``) are silently dropped so callers can never override the pipe
+    fds, output cap, rlimits, or the driver's own scrubbed values.
     """
     env = scrub_env()
     env.update(
@@ -101,7 +102,7 @@ def _build_sandbox_env(
     )
     if extra_env:
         for key, value in extra_env.items():
-            if key.startswith("RLM_"):
+            if key.startswith("RLM_") or key in KEEP_ENV:
                 continue
             env[key] = value
     return env

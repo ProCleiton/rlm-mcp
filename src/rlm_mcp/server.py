@@ -34,8 +34,9 @@ from rlm_mcp.session import SessionError, SessionManager
 from rlm_mcp.types import Limits, Mode, OpenSpec, SubResult
 
 #: Validated ``trusted_env`` names: uppercase, digits/underscores, no secret
-#: values ever logged (only key names appear in error messages).
-_TRUSTED_ENV_KEY_RE = re.compile(r"^[A-Z][A-Z0-9_]*$")
+#: values ever logged (only key names appear in error messages). Minimum
+#: length 2, maximum 64 chars: ``^[A-Z][A-Z0-9_]{1,63}$``.
+_TRUSTED_ENV_KEY_RE = re.compile(r"^[A-Z][A-Z0-9_]{1,63}$")
 
 
 def _validate_trusted_env(
@@ -45,9 +46,9 @@ def _validate_trusted_env(
 
     ``mode`` must be ``"doc"`` or ``"exec"``; ``trusted_env`` is only
     accepted with ``mode == "exec"``. Keys must match
-    ``^[A-Z][A-Z0-9_]*$`` and must not start with ``RLM_`` (reserved for
-    the driver's internal pipe-fd/rlimit params). Values must be strings.
-    Never logs values, only key names.
+    ``^[A-Z][A-Z0-9_]{1,63}$`` (2-64 chars, uppercase start) and must not
+    start with ``RLM_`` (reserved for the driver's internal pipe-fd/rlimit
+    params). Values must be strings. Never logs values, only key names.
     """
     if mode not in ("doc", "exec"):
         raise ValueError(f"invalid mode {mode!r}: expected 'doc' or 'exec'")
@@ -58,9 +59,11 @@ def _validate_trusted_env(
     if mode != "exec":
         raise ValueError("trusted_env requires mode='exec'")
     validated: dict[str, str] = {}
+    pattern = r"^[A-Z][A-Z0-9_]{1,63}$"
     for key, value in trusted_env.items():
-        if not isinstance(key, str) or not _TRUSTED_ENV_KEY_RE.match(key):
-            raise ValueError(f"invalid trusted_env key {key!r}: must match ^[A-Z][A-Z0-9_]*$")
+        bad = not isinstance(key, str) or not _TRUSTED_ENV_KEY_RE.match(key)
+        if bad:
+            raise ValueError(f"invalid trusted_env key {key!r}: must match {pattern}")
         if key.startswith("RLM_"):
             raise ValueError(f"invalid trusted_env key {key!r}: 'RLM_' prefix is reserved")
         if not isinstance(value, str):
