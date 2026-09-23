@@ -72,7 +72,12 @@ Rules
    A finished job returns its terminal result (a needs_llm still resumes
    via the synchronous rlm_resume); a queued/running job past timeout
    returns {status: "pending", ...} without cancelling -- poll it again.
-
+9. Background processes inside one exec: spawn_background(cmd) runs a real
+   OS child (e.g. ["make", "-j4"]) and returns a BackgroundHandle that
+   survives across rlm_exec calls in the same session. Poll with h.poll()
+   (None while alive), stream with h.read_output() (incremental), end
+   with h.kill(). The sandbox kills leftovers on shutdown; the supervisor
+   killpg on the sandbox process group covers the tree.
 Idiomatic pattern (summarize a long context, chunk by chunk):
 
 # `context` is the full text inside the sandbox; `chunk_text` splits it into
@@ -105,10 +110,10 @@ INSTRUCTIONS: str = (
     "sandbox REPL as the variable `context`; you see only metadata and "
     "work on it by running Python code with rlm_exec. Loop over chunks "
     "and call llm_query / llm_query_batched inside the code: execution "
-    "suspends and rlm_exec returns status=\"needs_llm\" with requests. "
+    'suspends and rlm_exec returns status="needs_llm" with requests. '
     "Answer each request with your own model (fan out to subagents in "
     "parallel for several ids) and feed the texts back with rlm_resume; "
-    "kind=\"rlm\" means delegate to a subagent that opens a child session "
+    'kind="rlm" means delegate to a subagent that opens a child session '
     "via rlm_open(parent_session_id=...). Finish with FINAL / FINAL_VAR. "
     "For long runs use rlm_exec_async + rlm_wait (FIFO queue, poll again "
     "on pending). "

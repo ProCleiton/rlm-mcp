@@ -198,7 +198,10 @@ The cycle is driven by the harness agent:
 2. `rlm_exec` runs Python in the sandbox namespace, which persists across
    calls. The code sees the document as `context` and can call the reserved
    helpers `llm_query(prompt)`, `llm_query_batched([...])`,
-   `rlm_query(...)`, and the terminals `FINAL(text)` / `FINAL_VAR("name")`.
+   `rlm_query(...)`, `spawn_background(cmd)` (Fase 4: real OS child +
+   `BackgroundHandle` with `.poll()`/`.read_output()`/`.kill()`/`.pid`,
+   surviving across execs in the same session), and the terminals
+   `FINAL(text)` / `FINAL_VAR("name")`.
 3. When the code calls `llm_query`, the sandbox **suspends mid-loop** and
    `rlm_exec` returns `{status: "needs_llm", requests: [{id, kind, prompt},
    ...]}`. The agent answers each request with its own model:
@@ -265,6 +268,15 @@ what crosses the session boundary stays small.
 # rlm_exec(sid, "import subprocess; "
 #     "out = subprocess.run(['make', '-j4'], capture_output=True, text=True, timeout=500); "
 #     "print(out.stdout[-4000:])")
+```
+
+### Background-process example (Fase 4: spawn, poll, read, kill)
+
+```python
+# rlm_exec(sid, "h = spawn_background(['make', '-j4'])")
+# rlm_exec(sid, "print(h.poll())")        # None while alive; exit code after
+# rlm_exec(sid, "print(h.read_output())") # incremental: only new bytes since last call
+# rlm_exec(sid, "h.kill(); print(h.poll())")
 ```
 
 Exec sessions raise the `RLIMIT_NPROC` default to 2048 (`doc` stays at 256);
