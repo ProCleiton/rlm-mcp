@@ -27,7 +27,10 @@ import json
 import operator
 import os
 import resource
+import signal
+import subprocess
 import sys
+import threading
 import traceback
 from collections.abc import Callable, Iterable
 
@@ -49,6 +52,8 @@ RESERVED_NAMES = frozenset(
         "FINAL_VAR",
         "SHOW_VARS",
         "chunk_text",
+        "spawn_background",
+        "BackgroundHandle",
     }
 )
 
@@ -123,6 +128,129 @@ def chunk_text(text: str, size: int = 4000, overlap: int = 200) -> list[str]:
             break
         start += step
     return chunks
+
+
+#: pid -> BackgroundHandle registry for shutdown cleanup. Module-level so the
+#: sandbox exit path (shutdown/exception/fatal) can reap live children even
+#: when the user namespace has been dropped.
+_BACKGROUND_REGISTRY: dict[int, BackgroundHandle] = {}
+
+
+class BackgroundHandle:
+    """Handle to a detached child process spawned with spawn_background()."""
+
+    def __init__(self, proc: subprocess.Popen[str]) -> None:
+        self._proc = proc
+        self._lock = threading.Lock()
+        self._buf: list[str] = []
+        self._buf_len = 0
+        self._consumed = 0
+        self._closed = False
+        assert proc.stdout is not None
+        self._reader = threading.Thread(target=self._drain, daemon=True)
+        self._reader.start()
+        _BACKGROUND_REGISTRY[proc.pid] = self
+
+    @property
+    def pid(self) -> int:
+        """OS pid of the direct child."""
+        assert self._proc.pid is not None
+        return self._proc.pid
+
+    def _drain(self) -> None:
+        # Dedicated reader thread per process: user execs run on the
+        # interpreter thread, so a blocking read here never stalls the
+        # REPL; chunks accumulate under a lock for poll()/read_output().
+        # readline() (not read()) so a long-lived child that prints one
+        # line then sleeps still delivers that line promptly.
+        try:
+            assert self._proc.stdout is not None
+            while True:
+                chunk = self._proc.stdout.readline()
+                if not chunk:
+                    break
+                with self._lock:
+                    self._buf.append(chunk)
+                    self._buf_len += len(chunk)
+        except (ValueError, OSError):
+            pass
+        finally:
+            with contextlib.suppress(Exception):
+                assert self._proc.stdout is not None
+                self._proc.stdout.close()
+
+    def poll(self) -> int | None:
+        """Return exit code, or None while the process is still running."""
+        return self._proc.poll()
+
+    def read_output(self) -> str:
+        """Return output accumulated since the previous read_output() call.
+
+        Incremental/consume semantics: each call returns only the bytes that
+        arrived after the last call ("" when none). Documented choice: for
+        long-lived processes a cumulative getter would grow unboundedly and
+        force every poller to re-slice; consuming lets a loop poll without
+        re-reading.
+        """
+        with self._lock:
+            text = "".join(self._buf)
+            self._buf = []
+            self._buf_len = 0
+            self._consumed += len(text)
+            return text
+
+    def kill(self) -> None:
+        """SIGKILL the child and reap it; best effort, idempotent."""
+        proc = self._proc
+        if proc.returncode is not None:
+            return
+        # The child shares the sandbox process group (no start_new_session):
+        # the supervisor's killpg on the sandbox group already covers the
+        # whole tree, so kill() only needs the direct child. Grandchildren
+        # that daemonize into a new session would escape both; that is an
+        # accepted non-goal of this phase.
+        with contextlib.suppress(ProcessLookupError, PermissionError, OSError):
+            proc.kill()
+        with contextlib.suppress(OSError, ValueError):
+            proc.wait(timeout=5)
+
+
+def _cleanup_background_processes() -> None:
+    """SIGKILL every live background child registered in this process."""
+    for handle in list(_BACKGROUND_REGISTRY.values()):
+        with contextlib.suppress(Exception):
+            handle.kill()
+    _BACKGROUND_REGISTRY.clear()
+
+
+def spawn_background(
+    cmd: list[str],
+    **popen_kwargs: object,
+) -> BackgroundHandle:
+    """Spawn ``cmd`` as a detached background child; return its handle.
+
+    Defaults are containment-safe: stdout=PIPE merged with stderr
+    (stderr=STDOUT), text mode, and bufsize=1 (line-buffered) so
+    read_output() sees lines promptly. Callers may override cwd/env but
+    cannot smuggle start_new_session=True: the child MUST stay in the
+    sandbox process group so the supervisor's killpg on close/timeout
+    reaps the whole tree (zero-orphan guarantee preserved from driver.py).
+    """
+    if not isinstance(cmd, (list, tuple)) or not cmd or not all(
+        isinstance(part, str) for part in cmd
+    ):
+        raise ValueError("spawn_background(cmd) requires a non-empty list[str]")
+    if popen_kwargs.get("start_new_session"):
+        raise ValueError("start_new_session=True is refused: children must stay in the sandbox process group")
+    if popen_kwargs.get("stdout") is not None or popen_kwargs.get("stderr") is not None:
+        raise ValueError("stdout/stderr capture is managed by the handle; pass no stdout/stderr")
+    kwargs: dict[str, object] = dict(popen_kwargs)
+    kwargs["stdout"] = subprocess.PIPE
+    kwargs["stderr"] = subprocess.STDOUT
+    kwargs["text"] = True
+    kwargs.setdefault("bufsize", 1)
+    proc = subprocess.Popen(cmd, **kwargs)  # type: ignore[arg-type]
+    return BackgroundHandle(proc)
 
 
 class _Capture(io.TextIOBase):
@@ -337,6 +465,8 @@ def _build_namespace(
             "FINAL_VAR": FINAL_VAR,
             "SHOW_VARS": SHOW_VARS,
             "chunk_text": chunk_text,
+            "spawn_background": spawn_background,
+            "BackgroundHandle": BackgroundHandle,
         }
     )
     return ns
@@ -609,6 +739,7 @@ def _main() -> int:
             # Stray frames (e.g. an llm_response nobody is waiting for) are
             # dropped: the protocol keeps strict request/response alternation.
     finally:
+        _cleanup_background_processes()
         with contextlib.suppress(OSError, ValueError):
             outp.flush()
     return 0

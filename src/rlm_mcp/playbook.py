@@ -72,7 +72,12 @@ Rules
    A finished job returns its terminal result (a needs_llm still resumes
    via the synchronous rlm_resume); a queued/running job past timeout
    returns {status: "pending", ...} without cancelling -- poll it again.
-
+9. Background processes inside one exec: spawn_background(cmd) runs a real
+   OS child (e.g. ["make", "-j4"]) and returns a BackgroundHandle that
+   survives across rlm_exec calls in the same session. Poll with h.poll()
+   (None while alive), stream with h.read_output() (incremental), end
+   with h.kill(). The sandbox kills leftovers on shutdown; the supervisor
+   killpg on the sandbox process group covers the tree.
 Idiomatic pattern (summarize a long context, chunk by chunk):
 
 # `context` is the full text inside the sandbox; `chunk_text` splits it into

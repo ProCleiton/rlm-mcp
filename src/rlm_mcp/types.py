@@ -33,6 +33,8 @@ RESERVED_NAMES: frozenset[str] = frozenset(
         "FINAL_VAR",
         "SHOW_VARS",
         "chunk_text",
+        "spawn_background",
+        "BackgroundHandle",
     }
 )
 

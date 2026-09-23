@@ -2,6 +2,8 @@
 
 Status: Fases 1, 2 e 3 IMPLEMENTADAS e mergeadas em `main`
 (Fase 3: `3766162`, merge de `feat/exec-multi-job-phase3`, 2026-09-23).
+Fase 4 (`spawn_background`/`BackgroundHandle`/cleanup) IMPLEMENTADA na
+branch `feat/sandbox-background-process-phase4` (seção 5b), ainda não mergeada.
 Formato: segue a convenção do repo — `docs/DESIGN.md` com seções numeradas
 (citada nas docstrings do código, ex. `server.py` referencia "docs/DESIGN.md,
 section 5"). O repo não usa OpenSpec (sem diretório `openspec/`), então este
@@ -137,6 +139,36 @@ coleta por sessão, sem alterar o protocolo single-flight do sandbox:
   Fase 2; a única mudança necessária é usar o novo handle retornado, em vez
   de assumir `handle == session_id`.
 
+## 5b. Fase 4 — IMPLEMENTADA (branch `feat/sandbox-background-process-phase4`)
+
+Processo background real DENTRO do sandbox, sem mudar o protocolo de frames
+(`exec`/`exec_done` reusados; o processo é um objeto Python vivo no
+namespace persistente `ns`):
+
+- **API:** `spawn_background(cmd: list[str], **popen_kwargs)` exposta no
+  namespace + classe `BackgroundHandle` (`.pid`, `.poll()`,
+  `.read_output()` incremental, `.kill()`). Defaults seguros: `stdout=PIPE`
+  com `stderr=STDOUT` fundidos, `text=True`, `bufsize=1` (line-buffered).
+- **Thread leitora dedicada por processo** acumulando em buffer com lock:
+  `exec`s do usuário rodam na thread do interpretador, então um `read()`
+  bloqueante ali pararia o REPL; a thread usa `readline()` para entregar
+  linhas prontas mesmo quando o filho imprime pouco e dorme em seguida.
+- **`read_output()` consome (incremental):** cada chamada retorna só os
+  bytes chegados desde a chamada anterior. Escolha documentada: um getter
+  cumulativo cresceria sem limite e obrigaria todo poller a re-fatiar.
+- **`start_new_session` recusado:** `spawn_background` rejeita
+  `start_new_session=True` e `stdout=`/`stderr=` explícitos. O filho
+  permanece no process group do sandbox, de modo que o `killpg` do
+  supervisor no `close`/timeout (`driver.py`, `start_new_session=True` no
+  agente) continua matando a árvore inteira — garantia zero-órfão
+  preservada e avaliada, não herdada por acidente.
+- **Cleanup garantido:** registro interno module-level `pid -> handle`;
+  o caminho de encerramento do sandbox (`shutdown`/exceção fatal/fim do
+  processo em `agent.py`, bloco `finally` do `_main`) itera o registro e
+  mata vivos ANTES de terminar.
+- **Nomes reservados:** `spawn_background` e `BackgroundHandle` entram em
+  `RESERVED_NAMES` (`types.py` + duplicata em `agent.py`); rebind via
+  `rlm_exec` continua recusado com `RebindRefused`.
 ## 6. Tabela de escopo/risco
 
 | # | Mudança | Escopo | Risco regressão modo atual |
