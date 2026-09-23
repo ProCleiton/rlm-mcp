@@ -185,7 +185,8 @@ def _register_tools(server: MCPServer, manager: SessionManager, base_limits: Lim
             "variable `context`. Returns session_id, depth, context metadata "
             "(never the raw text) and the budget. Pass parent_session_id to open "
             "a child session for recursive (depth>1) work. Optional `limits` "
-            "overrides per-session budgets."
+            "overrides per-session budgets. `mode` is 'doc' (default) or 'exec'; "
+            "`trusted_env` (name allowlist, values never logged) only with 'exec'."
         ),
     )
     async def rlm_open(

@@ -54,19 +54,6 @@ uv sync --extra dev    # editable install + dev deps into .venv
 Without `uv`: `python3 -m pip install --user -e '.[dev]'`. The dev binary is
 `.venv/bin/rlm-mcp`; run it directly or via `uv run rlm-mcp --help`.
 
-**While the `feat/rlm-over-mcp-core` branch is not merged into `main`**,
-install that branch instead:
-
-```bash
-./install.sh --branch feat/rlm-over-mcp-core
-# or, without the script:
-uv tool install --from git+https://github.com/ProCleiton/rlm-mcp@feat/rlm-over-mcp-core rlm-mcp
-```
-
-`install.sh` also detects this pre-merge state: if a default-branch
-(`main`) install fails, it prints a hint telling you to re-run with
-`--branch feat/rlm-over-mcp-core`.
-
 Verify the install:
 
 ```bash
@@ -187,7 +174,7 @@ tools:
 
 | Tool | Input | Output |
 | --- | --- | --- |
-| `rlm_open` | `text?`, `paths?`, `parent_session_id?`, `limits?` | `{session_id, depth, context: <metadata>, budget}` |
+| `rlm_open` | `text?`, `paths?`, `parent_session_id?`, `limits?`, `mode?` (`"doc"` default, `"exec"` opt-in), `trusted_env?` (only with `mode="exec"`) | `{session_id, depth, context: <metadata>, budget}` |
 | `rlm_exec` | `session_id`, `code` | step result: `ok` / `needs_llm` / `final` / `error` / `exhausted` |
 | `rlm_exec_async` | `session_id`, `code` | unique `{handle, state}`; multiple jobs queue FIFO per session |
 | `rlm_wait` | `handle`, `timeout?` | terminal step result, or `{status: "pending", state, elapsed}` |
@@ -202,7 +189,12 @@ The cycle is driven by the harness agent:
    sandbox. The agent only receives **metadata** — type, length, head/tail
    preview — plus `session_id`, `depth` and the budget. Passing
    `parent_session_id` opens a *child* session, which is how recursion depth
-   > 1 works.
+   > 1 works. `mode` defaults to `"doc"` (current behavior, unchanged); pass
+   `mode="exec"` plus `trusted_env={...}` for builds/long shell runs
+   (key names `^[A-Z][A-Z0-9_]{1,63}$`, no `RLM_` prefix, no `KEEP_ENV`
+   overrides; only names are logged). Raised ceilings use the existing
+   `limits` overrides, e.g. `limits={"max_exec_seconds": 600,
+   "max_wall_seconds": 900}`.
 2. `rlm_exec` runs Python in the sandbox namespace, which persists across
    calls. The code sees the document as `context` and can call the reserved
    helpers `llm_query(prompt)`, `llm_query_batched([...])`,
@@ -223,10 +215,21 @@ The cycle is driven by the harness agent:
    resumes where it stopped; the loop repeats until the code hits a
    terminal.
 5. `rlm_status` reports the real budget (depth, iterations, LLM calls,
-   output size, wall time) against the limits; the agent should plan the
+   output size, wall time) against the limits — including pending async jobs
+   as `jobs: [{handle, state, elapsed}]`; the agent should plan the
    decomposition up front and let child sessions do the heavy lifting.
-6. The code must end with `FINAL(text)` or `FINAL_VAR("name")`; the agent
-   then closes finished sessions with `rlm_close` so their budgets release.
+6. Long runs use the async flow: `rlm_exec_async(session_id, code)` returns a
+   unique `{handle, state}` immediately and several jobs per session queue
+   FIFO (the sandbox stays single-flight). `rlm_wait(handle, timeout=30)`
+   collects one job — finished jobs return the terminal step result
+   (`needs_llm` still resumes via the synchronous `rlm_resume`); a
+   queued/running job past `timeout` returns `{status: "pending", state,
+   elapsed}` without cancelling, so poll again later. Collection order is
+   independent of FIFO execution order.
+7. The code must end with `FINAL(text)` or `FINAL_VAR("name")`; the agent
+   then closes finished sessions with `rlm_close` so their budgets release
+   (closing cancels queued/running/uncollected async jobs; a synchronous
+   step in flight still refuses `close`).
 
 ### Minimal example
 
@@ -254,6 +257,20 @@ or more requests, answers them through `rlm_resume`, and the loop continues
 where it stopped — the answers are handed back to the code as strings, so
 what crosses the session boundary stays small.
 
+### Exec-mode example (real command via subprocess)
+
+```python
+# sid = rlm_open(paths=[...], mode="exec", trusted_env={"CI": "1"},
+#                limits={"max_exec_seconds": 600, "max_wall_seconds": 900})
+# rlm_exec(sid, "import subprocess; "
+#     "out = subprocess.run(['make', '-j4'], capture_output=True, text=True, timeout=500); "
+#     "print(out.stdout[-4000:])")
+```
+
+Exec sessions raise the `RLIMIT_NPROC` default to 2048 (`doc` stays at 256);
+an explicit `RLM_RLIMIT_NPROC` operator env var always wins, and heavily
+loaded hosts may still need to raise it manually.
+
 The server advertises the prompt **`rlm_playbook`** (the short version is
 also served as the server `instructions` field): it teaches the agent the
 full protocol — reserved names, chunking idiom, subagent fan-out for
@@ -263,9 +280,12 @@ behavior. Its text lives in `src/rlm_mcp/playbook.py`.
 ## 4. Security
 
 The default driver runs your code in a **local subprocess** (`python3 -I -S`)
-with `RLIMIT_AS`, `RLIMIT_CPU`, `RLIMIT_FSIZE` and `RLIMIT_NPROC`, a
-dedicated temp working directory, and an environment scrubbed of
-`*_KEY`/`*_TOKEN`/`*_SECRET`/`*_PASSWORD` and provider variables.
+with `RLIMIT_AS`, `RLIMIT_CPU`, `RLIMIT_FSIZE` and `RLIMIT_NPROC` (default
+256 for `mode="doc"`, 2048 for `mode="exec"`; explicit `RLM_RLIMIT_NPROC`
+always wins), a dedicated temp working directory, and an environment scrubbed
+of `*_KEY`/`*_TOKEN`/`*_SECRET`/`*_PASSWORD` and provider variables.
+`mode="exec"` sessions may additionally reinject a whitelisted `trusted_env`
+(validated before the session is created; values never logged).
 
 That is **containment, not isolation**: code you run can still read files
 your user can read. Treat the sandbox as an extension of your own shell —

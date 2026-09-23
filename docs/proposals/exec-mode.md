@@ -1,7 +1,7 @@
 # Modo `exec` opcional — plano de melhoria estrutural
 
-Status: Fases 1, 2 e 3 IMPLEMENTADAS (Fase 3: branch
-`feat/exec-multi-job-phase3`, 2026-09-23; base `main` em `7d11450`).
+Status: Fases 1, 2 e 3 IMPLEMENTADAS e mergeadas em `main`
+(Fase 3: `3766162`, merge de `feat/exec-multi-job-phase3`, 2026-09-23).
 Formato: segue a convenção do repo — `docs/DESIGN.md` com seções numeradas
 (citada nas docstrings do código, ex. `server.py` referencia "docs/DESIGN.md,
 section 5"). O repo não usa OpenSpec (sem diretório `openspec/`), então este
@@ -64,7 +64,7 @@ após a anterior estar validada em uso real.
    isso no modo `exec` (ex. `max_wall_seconds` alto para builds longos),
    sem mudança de código.
 
-## 4. Fase 2 — IMPLEMENTADA (branch `feat/exec-async-phase2`, 2026-09-23)
+## 4. Fase 2 — IMPLEMENTADA (branch `feat/exec-async-phase2`, 2026-09-23; superada pela Fase 3 abaixo quanto a handles — o handle deixou de ser o `session_id`)
 
 `rlm_exec_async(session_id, code) -> {handle, state}` + `rlm_wait(handle,
 timeout=30)` — desacopla a chamada MCP síncrona do tempo real de execução,

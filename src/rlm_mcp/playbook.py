@@ -66,6 +66,12 @@ Rules
    limits, e.g. rlm_open(paths=[...], mode="exec",
    trusted_env={"CI": "1"}, limits={"max_exec_seconds": 600,
    "max_wall_seconds": 900}). Only key names are ever logged, never values.
+8. Long runs: prefer rlm_exec_async(session_id, code) over a blocking
+   rlm_exec. Dispatch returns {handle, state} immediately and several jobs
+   queue FIFO per session; collect each with rlm_wait(handle, timeout).
+   A finished job returns its terminal result (a needs_llm still resumes
+   via the synchronous rlm_resume); a queued/running job past timeout
+   returns {status: "pending", ...} without cancelling -- poll it again.
 
 Idiomatic pattern (summarize a long context, chunk by chunk):
 
@@ -104,6 +110,8 @@ INSTRUCTIONS: str = (
     "parallel for several ids) and feed the texts back with rlm_resume; "
     "kind=\"rlm\" means delegate to a subagent that opens a child session "
     "via rlm_open(parent_session_id=...). Finish with FINAL / FINAL_VAR. "
+    "For long runs use rlm_exec_async + rlm_wait (FIFO queue, poll again "
+    "on pending). "
     "rlm_peek pages through expression values, rlm_status shows budgets, "
     "rlm_close ends sessions. Read the rlm_playbook prompt for the full "
     "protocol and an idiomatic example."

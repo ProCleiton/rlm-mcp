@@ -43,7 +43,7 @@ are used — the server has neither.
 ```
  agent (root LM)                    server (sandbox REPL + budgets)
    │
-   │  rlm_open(text?, paths?, parent_session_id?)
+   │  rlm_open(text?, paths?, parent_session_id?, limits?, mode?, trusted_env?)
    ├──────────────────────────────────────────────► load `context`, open session
    │  {session_id, depth, context: <metadata>, budget}
    │
@@ -73,11 +73,13 @@ of work.
 
 | Tool | Input | Output |
 |------|-------|--------|
-| `rlm_open` | `text?`, `paths?`, `parent_session_id?`, budget overrides | `{session_id, depth, context: <metadata>, budget}` |
+| `rlm_open` | `text?`, `paths?`, `parent_session_id?`, `limits?`, `mode?` (`"doc"` default, `"exec"` opt-in), `trusted_env?` (only with `mode="exec"`) | `{session_id, depth, context: <metadata>, budget}` |
 | `rlm_exec` | `session_id`, `code` | step result: `ok` / `needs_llm` / `final` / `error` / `exhausted` |
+| `rlm_exec_async` | `session_id`, `code` | unique `{handle, state}`; multiple jobs queue FIFO per session |
+| `rlm_wait` | `handle`, `timeout?` | terminal step result, or `{status: "pending", state, elapsed}` |
 | `rlm_resume` | `session_id`, `results: [{id, text, error?}]` | step result (see `rlm_exec`) |
 | `rlm_peek` | `session_id`, `expr`, `offset?`, `limit?` | `{text, offset, returned, total, truncated}` |
-| `rlm_status` | `session_id` | `{depth, spent, limits, state, trajectory}` |
+| `rlm_status` | `session_id` | `{depth, spent, limits, state, jobs: [{handle, state, elapsed}], trajectory}` |
 | `rlm_close` | `session_id` | `{closed: [session_id, ...]}` |
 
 `rlm_exec` runs Python in the sandbox namespace; the namespace persists across
@@ -86,6 +88,35 @@ calls. Reserved names (`context`, `llm_query`, `llm_query_batched`, `rlm_query`,
 `rlm_playbook` prompt for the full protocol and an idiomatic code example.
 Trajectories are exposed as the resource `rlm://trajectory/{root_id}` (JSONL of
 the whole session tree).
+
+### Exec mode (opt-in)
+
+`rlm_open` defaults to `mode="doc"` (current behavior, unchanged). For builds
+or long shell runs, open with `mode="exec"` and pass only the needed vars via
+`trusted_env` (names must match `^[A-Z][A-Z0-9_]{1,63}$`, no `RLM_` prefix, no
+`KEEP_ENV` overrides; only key names are ever logged, never values):
+
+```python
+# inside the harness: open one exec session, then run a real command via subprocess
+# sid = rlm_open(paths=[...], mode="exec", trusted_env={"CI": "1"},
+#                limits={"max_exec_seconds": 600, "max_wall_seconds": 900})
+# rlm_exec(sid, "import subprocess; out = subprocess.run(['make', '-j4'], capture_output=True, text=True, timeout=500); print(out.stdout[-4000:])")
+```
+
+Exec sessions raise the `RLIMIT_NPROC` default to 2048 (`doc` stays at 256);
+an explicit `RLM_RLIMIT_NPROC` operator env var always wins, and heavily
+loaded hosts may still need to raise it manually.
+
+### Long runs (async)
+
+`rlm_exec_async(session_id, code)` queues code and returns a unique
+`{handle, state}` immediately; several jobs per session run FIFO because the
+sandbox stays single-flight. Collect any job with `rlm_wait(handle,
+timeout=30)`: a finished job returns its terminal step result
+(`ok`/`needs_llm`/`final`/`error`/`exhausted`, so `needs_llm` still resumes
+via the synchronous `rlm_resume`); a queued/running job past `timeout`
+returns `{status: "pending", state, elapsed}` without cancelling — poll again
+later. Collection order is independent of FIFO execution order.
 
 ## Installing and configuring
 
